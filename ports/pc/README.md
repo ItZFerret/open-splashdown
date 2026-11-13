@@ -91,6 +91,7 @@ What differs off Linux (`os.cpp`, `lowheap.cpp`, `nodebug.cpp`): the game's heap
 | Scaling | Smooth (linear), Sharp (nearest), Integer (whole multiples) |
 | VSync | Off, On |
 | FPS counter | Off, On |
+| Skip intro | Off, On: the publisher logos and the intro movie become two black frames each, so the game starts at the menu |
 
 Widescreen is a wider field of view, not a stretched picture: the game still renders 640x448 (the GS is the PS2's, in software), `ports/pc/game/widescreen_pc.cpp` widens the projection's horizontal field of view by the shape's ratio to 4:3, and the presenter shows the picture in that shape. Clipping and culling follow the projection; the near-water patch is widened to match (`PSXWaterDisplacement.cpp`, `SPLASHDOWN_PC`). What doesn't go through a projection is stretched with the picture: the HUD, the menus and the movies. There is no higher internal resolution or anti-aliasing: that would take a different rasterizer.
 

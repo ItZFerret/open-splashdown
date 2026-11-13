@@ -32,7 +32,8 @@ Z = Square, V = Triangle, Enter = Start, Tab = Select, Q / E = L1 / R1,
 1 / 3 = L2 / R2.
 
 Press F1 for the display settings: widescreen (16:9, 21:9 ...), fullscreen,
-window size, scaling, VSync and a frame counter.
+window size, scaling, VSync, a frame counter, and Skip intro (start at the
+menu without the logos and intro movie).
 
 Saves go to %APPDATA%\splashdown\memcard0.
 

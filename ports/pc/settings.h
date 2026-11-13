@@ -13,6 +13,7 @@ struct PortSettings {
     int scaling = kScaleSmooth; // how the 640x448 picture is enlarged
     int vsync = 0;
     int showFps = 0;
+    int skipIntro = 0;          // no publisher logos or intro movie at start-up
 };
 
 // The settings (main thread only), loaded from the file at first use.
@@ -22,6 +23,11 @@ void port_settings_save(void);
 // The picture's width / height for an aspect setting in a window of ww x wh
 // pixels (kAspectFill: the window's own shape).
 float port_aspect_value(int aspect, int ww, int wh);
+
+// Skip intro: the movie decoder (ports/pc/sdk/mpeg.cpp, on the game's
+// thread) asks; the presenter sets it from the settings when a window is up.
+void port_skip_intro_set(bool skip);
+bool port_skip_intro(void);
 
 // Widescreen: the game renders 640x448 whatever the shape it is shown in, so
 // a wider picture needs a wider horizontal field of view in the same pixels.

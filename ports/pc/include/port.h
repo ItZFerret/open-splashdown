@@ -107,6 +107,8 @@ void port_input_rumble(int pad, uint8_t small, uint8_t large);
 // ports/pc/sdk/cdvd.cpp: read the disc image at a byte offset, from any thread
 // (the IOP's reads: ports/pc/audio). Returns the bytes read (the rest zeroed).
 size_t port_disc_read(uint64_t offset, void *buf, size_t bytes);
+// The first sector of the file the current sceCdSt* stream was started on.
+unsigned port_disc_stream_lsn(void);
 
 // ports/pc/audio: the IOP sound driver and its output.
 // main(): open the output (SDL audio, PORT_AUDIO_WAV, PORT_NO_AUDIO).

@@ -135,6 +135,7 @@ struct Window {
             return false;
         }
         SDL_SetRenderVSync(renderer, s.vsync ? 1 : 0);
+        port_skip_intro_set(s.skipIntro != 0);
         applied = s;
         port_log("video: %s renderer; F1 opens the settings", SDL_GetRendererName(renderer));
         return true;
@@ -154,6 +155,7 @@ struct Window {
         }
         if (s.vsync != applied.vsync)
             SDL_SetRenderVSync(renderer, s.vsync ? 1 : 0);
+        port_skip_intro_set(s.skipIntro != 0);
         if (texture)
             SDL_SetTextureScaleMode(texture, s.scaling == kScaleSmooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
         applied = s;

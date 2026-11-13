@@ -33,6 +33,7 @@ const unsigned kSector = 2048;
 FILE *g_disc;
 int g_error;
 unsigned g_streamLsn; // the next sector a sceCdSt* stream reads
+unsigned g_streamStart; // where the stream was started: its file's first sector
 
 std::string DiscPath()
 {
@@ -117,6 +118,12 @@ size_t port_disc_read(uint64_t offset, void *buf, size_t bytes)
     return done;
 }
 
+// The first sector of the file the current stream (a movie) was started on.
+unsigned port_disc_stream_lsn(void)
+{
+    return g_streamStart;
+}
+
 extern "C" {
 
 int sceCdInit(int mode)
@@ -174,6 +181,7 @@ int sceCdStInit(unsigned int bufmax, unsigned int bankmax, unsigned int iop_bufa
 
 int sceCdStStart(unsigned int lbn, void *mode)
 {
+    g_streamStart = lbn;
     g_streamLsn = lbn;
     return 1;
 }

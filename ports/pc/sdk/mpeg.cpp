@@ -46,8 +46,11 @@
 // audio reaches the driver. PORT_MOVIE_LOG=1 logs each movie's pictures
 // and timing.
 #include "port.h"
+#include "settings.h"
 
 #include <algorithm>
+#include <string>
+#include <cctype>
 #include <chrono>
 #include <cstdlib>
 #include <cstring>
@@ -102,6 +105,51 @@ bool NoMovies()
     static bool off = getenv("PORT_NO_MOVIES") && strcmp(getenv("PORT_NO_MOVIES"), "0");
     return off;
 #endif
+}
+
+} // namespace
+
+// The game's table of the disc's files (src/tu/MapFile.cpp): the name of
+// the one the current stream was started on, or "".
+struct MapFileEntry {
+    char *name;
+    int unk04;
+    unsigned int lsn;
+    int unk0C;
+    unsigned int lastLsn;
+    int unk14;
+    unsigned int size;
+    int unk1C;
+    unsigned int length;
+    int unk24;
+};
+
+extern MapFileEntry mapFile[];
+
+namespace {
+
+const char *StreamName()
+{
+    unsigned lsn = port_disc_stream_lsn();
+    for (int i = 0; i < 0x551; i++)
+        if (mapFile[i].name && lsn >= mapFile[i].lsn && lsn <= mapFile[i].lastLsn)
+            return mapFile[i].name;
+    return "";
+}
+
+// "Skip intro" (the F1 settings): the publisher logos and the intro movie,
+// which play before the main menu, become the two black frames too.
+bool SkipThisMovie()
+{
+    if (!port_skip_intro())
+        return false;
+    std::string name = StreamName();
+    for (char &c : name)
+        c = (char)toupper((unsigned char)c);
+    for (const char *intro : {"\\ATARI.PSS", "\\RAINBOW.PSS", "\\INTRO.PSS"})
+        if (name.find(intro) != std::string::npos)
+            return true;
+    return false;
 }
 
 [[maybe_unused]] bool Log()
@@ -452,6 +500,10 @@ int sceMpegCreate(void *mp, unsigned char *work_area, int work_area_size)
     memset(mp, 0, sizeof(Mpeg));
     if (NoMovies()) {
         port_log("mpeg: movie replaced by %d black frames (PORT_NO_MOVIES)", kStubFrames);
+        return 0;
+    }
+    if (SkipThisMovie()) {
+        port_log("mpeg: %s skipped (Skip intro)", StreamName());
         return 0;
     }
 #ifndef PORT_NO_FFMPEG

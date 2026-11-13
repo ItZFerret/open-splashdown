@@ -17,6 +17,7 @@ namespace {
 PortSettings g_settings;
 bool g_loaded;
 std::atomic<float> g_widescreen{1.0f};
+std::atomic<bool> g_skipIntro{false};
 
 struct Field {
     const char *name;
@@ -30,6 +31,7 @@ const Field kFields[] = {
     {"scaling", &PortSettings::scaling, 0, kScaleCount - 1},
     {"vsync", &PortSettings::vsync, 0, 1},
     {"show_fps", &PortSettings::showFps, 0, 1},
+    {"skip_intro", &PortSettings::skipIntro, 0, 1},
 };
 
 std::string Path()
@@ -95,6 +97,16 @@ float port_aspect_value(int aspect, int ww, int wh)
         return wh > 0 ? std::clamp((float)ww / wh, 1.0f, 5.4f) : 4.0f / 3;
     default: return 4.0f / 3;
     }
+}
+
+void port_skip_intro_set(bool skip)
+{
+    g_skipIntro.store(skip, std::memory_order_relaxed);
+}
+
+bool port_skip_intro(void)
+{
+    return g_skipIntro.load(std::memory_order_relaxed);
 }
 
 void port_widescreen_set(float aspect)

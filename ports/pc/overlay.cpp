@@ -34,7 +34,7 @@ const Color kText = {236, 240, 246, 255};
 const Color kDim = {138, 150, 170, 255};
 const Color kOff = {84, 94, 112, 255};
 
-enum RowId { kRowAspect, kRowDisplay, kRowWindow, kRowScaling, kRowVsync, kRowFps, kRowReset, kRowClose, kRows };
+enum RowId { kRowAspect, kRowDisplay, kRowWindow, kRowScaling, kRowVsync, kRowFps, kRowSkipIntro, kRowReset, kRowClose, kRows };
 
 struct Row {
     const char *label;
@@ -47,6 +47,7 @@ const Row kRowInfo[kRows] = {
     {"Scaling", "Smooth blends pixels. Sharp keeps them. Integer uses whole multiples."},
     {"VSync", "Waits for the display's refresh. The game itself runs at 30 FPS."},
     {"FPS counter", "Game frames per second, in the corner."},
+    {"Skip intro", "Starts at the menu: no publisher logos or intro movie."},
     {"Reset to defaults", "Puts every setting back."},
     {"Close", "Back to the game (Esc or F1)."},
 };
@@ -68,6 +69,7 @@ int *Value(PortSettings &s, int row, int *count)
     case kRowScaling: *count = kScaleCount; return &s.scaling;
     case kRowVsync: *count = 2; return &s.vsync;
     case kRowFps: *count = 2; return &s.showFps;
+    case kRowSkipIntro: *count = 2; return &s.skipIntro;
     }
     *count = 0;
     return nullptr;
@@ -88,6 +90,7 @@ std::string ValueText(const PortSettings &s, int row)
     case kRowScaling: return kScalings[s.scaling];
     case kRowVsync: return s.vsync ? "On" : "Off";
     case kRowFps: return s.showFps ? "On" : "Off";
+    case kRowSkipIntro: return s.skipIntro ? "On" : "Off";
     }
     return "";
 }
