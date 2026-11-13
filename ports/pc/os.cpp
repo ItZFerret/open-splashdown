@@ -45,6 +45,7 @@
 #include <sys/syscall.h>
 #elif defined(__APPLE__)
 #include <crt_externs.h>
+#include <pthread/qos.h>
 #include <mach-o/dyld.h>
 #include <spawn.h>
 #include <os/os_sync_wait_on_address.h>
@@ -303,6 +304,12 @@ void port_os_thread_name(const char *name)
 {
 #if defined(__APPLE__)
     pthread_setname_np(name);
+    // Every thread that gets a name is part of drawing a frame in time
+    // (the game, DMA, VU1, the GS and its workers): ask for the performance
+    // cores. At the default class macOS moves threads that sleep and wake
+    // as these do onto the efficiency cores, which costs a third of the
+    // frame rate at a high internal resolution.
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
 #else
     pthread_setname_np(pthread_self(), name);
 #endif

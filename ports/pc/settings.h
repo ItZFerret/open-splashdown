@@ -13,6 +13,7 @@ struct PortSettings {
     int scaling = kScaleSmooth; // how the 640x448 picture is enlarged
     int vsync = 0;
     int showFps = 0;
+    int resolution = 1;         // the GS draws at this many times 640x448, 1-3
     int skipIntro = 0;          // no publisher logos or intro movie at start-up
 };
 

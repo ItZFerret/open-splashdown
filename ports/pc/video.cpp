@@ -136,6 +136,7 @@ struct Window {
         }
         SDL_SetRenderVSync(renderer, s.vsync ? 1 : 0);
         port_skip_intro_set(s.skipIntro != 0);
+        gs_set_hires(s.resolution);
         applied = s;
         port_log("video: %s renderer; F1 opens the settings", SDL_GetRendererName(renderer));
         return true;
@@ -156,6 +157,7 @@ struct Window {
         if (s.vsync != applied.vsync)
             SDL_SetRenderVSync(renderer, s.vsync ? 1 : 0);
         port_skip_intro_set(s.skipIntro != 0);
+        gs_set_hires(s.resolution);
         if (texture)
             SDL_SetTextureScaleMode(texture, s.scaling == kScaleSmooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
         applied = s;
@@ -192,8 +194,10 @@ struct Window {
             ah = (float)wh;
             aw = ah * aspect;
         }
-        if (s.scaling == kScaleInteger && th > 0 && ah >= th) {
-            ah = (float)((int)ah / th * th);
+        // (whole multiples of the game's own lines, whatever it is drawn at)
+        int lines = th / std::max(1, s.resolution);
+        if (s.scaling == kScaleInteger && lines > 0 && ah >= lines) {
+            ah = (float)((int)ah / lines * lines);
             aw = ah * aspect;
         }
         SDL_FRect dst = {(ww - aw) / 2, (wh - ah) / 2, aw, ah};
@@ -243,6 +247,7 @@ struct {
     std::mutex mutex;
     std::condition_variable cv;
     std::deque<Shot> queue;
+    std::vector<PortFrame> spare;  // buffers of frames shown, for the next ones
     bool presentPending;  // a window's frame not shown yet
 } V;
 
@@ -263,6 +268,23 @@ bool port_video_want(uint64_t seq)
         return false;
     std::lock_guard lock(V.mutex);
     return !V.presentPending;
+}
+
+PortFrame port_video_buffer(void)
+{
+    std::lock_guard lock(V.mutex);
+    if (V.spare.empty())
+        return PortFrame();
+    PortFrame f = std::move(V.spare.back());
+    V.spare.pop_back();
+    return f;
+}
+
+void port_video_recycle(PortFrame &&rgba)
+{
+    std::lock_guard lock(V.mutex);
+    if (V.spare.size() < 4)
+        V.spare.push_back(std::move(rgba));
 }
 
 void port_video_frame(uint64_t seq, PortFrame &&rgba, int w, int h)
@@ -293,6 +315,10 @@ void port_video_run(volatile bool *done)
     if (!headless && !win.Open())
         headless = true;
     V.headless = headless;
+    // PORT_HIRES=2 (or 3): the internal resolution without a window, for
+    // headless tests; the screenshots are that much larger.
+    if (const char *r = getenv("PORT_HIRES"); r && headless)
+        gs_set_hires(atoi(r));
     // PORT_ASPECT=16:9 (or 1.778): the game's field of view for that shape
     // without a window, for headless tests; the 640x448 screenshots are
     // then the picture before it is stretched to the shape.
@@ -381,6 +407,8 @@ void port_video_run(volatile bool *done)
             port_log("video: exit at frame %llu", (unsigned long long)seq);
             port_exit(0);
         }
+        for (Shot &f : got)
+            port_video_recycle(std::move(f.rgba));
         auto now = std::chrono::steady_clock::now();
         // the overlay moves without the game: redraw over the last picture
         // (the game loading, or between its 30 frames a second)

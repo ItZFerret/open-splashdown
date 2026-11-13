@@ -32,6 +32,7 @@ const Field kFields[] = {
     {"vsync", &PortSettings::vsync, 0, 1},
     {"show_fps", &PortSettings::showFps, 0, 1},
     {"skip_intro", &PortSettings::skipIntro, 0, 1},
+    {"resolution", &PortSettings::resolution, 1, 3},
 };
 
 std::string Path()

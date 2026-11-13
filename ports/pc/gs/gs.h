@@ -31,6 +31,11 @@ using PortFrame = std::vector<uint32_t, PortMmapAllocator<uint32_t>>;
 // (the GIF DMA channel). Each keeps its own tag state between calls.
 enum GsPath { GS_PATH1 = 0, GS_PATH2 = 1, GS_PATH3 = 2 };
 
+// The internal resolution: 1 (the PS2's 640x448), 2 or 3 times it in each
+// direction, from the next frame on. The picture gs_read_display gives is
+// that much larger; local memory, and what the game reads from it, is not.
+void gs_set_hires(int scale);
+
 // Feed n quadwords of a GIF stream.
 void gs_gif_write(GsPath path, const void *qwords, size_t n);
 // PATH1: one GIF packet (tags up to EOP) from VU1 data memory at qword addr.
@@ -66,6 +71,11 @@ uint64_t gs_flip_count();
 // it (gs_read_display) before seq is published.
 bool port_video_want(uint64_t seq);
 void port_video_frame(uint64_t seq, PortFrame &&rgba, int w, int h);
+// A picture buffer the presenter is done with, or an empty one: a frame is
+// megabytes at a high internal resolution, so they go round instead of
+// being mapped and unmapped for each. Give back one that wasn't handed over.
+PortFrame port_video_buffer(void);
+void port_video_recycle(PortFrame &&rgba);
 // FINISH register writes (the game sends one per Flip).
 uint64_t gs_finish_count();
 // Primitives drawn so far.

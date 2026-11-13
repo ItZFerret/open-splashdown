@@ -34,7 +34,7 @@ const Color kText = {236, 240, 246, 255};
 const Color kDim = {138, 150, 170, 255};
 const Color kOff = {84, 94, 112, 255};
 
-enum RowId { kRowAspect, kRowDisplay, kRowWindow, kRowScaling, kRowVsync, kRowFps, kRowSkipIntro, kRowReset, kRowClose, kRows };
+enum RowId { kRowAspect, kRowResolution, kRowDisplay, kRowWindow, kRowScaling, kRowVsync, kRowFps, kRowSkipIntro, kRowReset, kRowClose, kRows };
 
 struct Row {
     const char *label;
@@ -42,6 +42,7 @@ struct Row {
 };
 const Row kRowInfo[kRows] = {
     {"Aspect ratio", "Wider shapes show more to the sides. The HUD and menus stretch."},
+    {"Resolution", "Draws with more pixels: sharper. 3x can drop below 30 FPS in races."},
     {"Display", "Fullscreen is borderless, at the desktop's resolution."},
     {"Window size", "The picture's height, in steps of the game's 448 lines."},
     {"Scaling", "Smooth blends pixels. Sharp keeps them. Integer uses whole multiples."},
@@ -64,6 +65,7 @@ int *Value(PortSettings &s, int row, int *count)
 {
     switch (row) {
     case kRowAspect: *count = kAspectCount; return &s.aspect;
+    case kRowResolution: *count = 3; return &s.resolution;   // 1..3
     case kRowDisplay: *count = 2; return &s.fullscreen;
     case kRowWindow: *count = 4; return &s.windowScale;   // 1..4
     case kRowScaling: *count = kScaleCount; return &s.scaling;
@@ -81,6 +83,11 @@ std::string ValueText(const PortSettings &s, int row)
     static const char *const kScalings[] = {"Smooth", "Sharp", "Integer"};
     switch (row) {
     case kRowAspect: return kAspects[s.aspect];
+    case kRowResolution: {
+        char buf[32];
+        snprintf(buf, sizeof buf, "%dx  (%dx%d)", s.resolution, 640 * s.resolution, 448 * s.resolution);
+        return buf;
+    }
     case kRowDisplay: return s.fullscreen ? "Fullscreen" : "Windowed";
     case kRowWindow: {
         char buf[32];
@@ -123,7 +130,7 @@ void Step(int row, int dir)
     }
     int count;
     int *v = Value(s, row, &count);
-    int base = row == kRowWindow ? 1 : 0;
+    int base = row == kRowWindow || row == kRowResolution ? 1 : 0;
     *v = base + ((*v - base + dir) % count + count) % count;
     Changed();
 }

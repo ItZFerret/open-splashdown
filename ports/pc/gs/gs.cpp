@@ -42,6 +42,9 @@ namespace {
 
 const uint32_t kVramBytes = 4 << 20;
 alignas(64) uint8_t g_vram[kVramBytes];
+// The high-resolution targets ("High resolution" below): colour and depth
+// buffers N times the size, as plain rows of words. Null at 1x.
+uint32_t *g_hiMem;
 std::recursive_mutex g_mutex;
 
 enum Psm : uint32_t {
@@ -263,6 +266,13 @@ struct DrawState {
     int tox, toy, tstride;
     bool fast;  // the fast path can draw it (given a decoded texture)
     uint64_t clutKey;  // the CLUT snapshot's content hash
+    // What the frame and depth buffers' words are indexed in: local memory,
+    // or (hi) the high-resolution targets, where they are rows of hiStride
+    // words from hiFb and hiZ.
+    const uint32_t *mem;
+    uint32_t hiFb, hiZ;
+    int hiStride;
+    bool hi;
 };
 
 struct Range {
@@ -494,6 +504,17 @@ inline uint32_t ReadBuf(uint32_t psm, uint32_t bp, uint32_t bw, int x, int y)
     return ReadPixel(psm, bp, bw, x, y);
 }
 
+// The frame and depth buffers' words at (x, y), CT32 and Z32/Z24.
+inline uint32_t &FbWord(const DrawState &S, int x, int y)
+{
+    return S.hi ? g_hiMem[S.hiFb + (uint32_t)y * S.hiStride + x] : Word(Addr32(S.fbp, S.fbw, x, y));
+}
+
+inline uint32_t &ZWord(const DrawState &S, int x, int y)
+{
+    return S.hi ? g_hiMem[S.hiZ + (uint32_t)y * S.hiStride + x] : Word(Addr32(S.zbp, S.fbw, x, y, 0x18));
+}
+
 // Everything after texturing for one pixel at (x, y).
 inline void PutPixel(const DrawState &S, int x, int y, Pixel p)
 {
@@ -533,7 +554,7 @@ inline void PutPixel(const DrawState &S, int x, int y, Pixel p)
     }
     // destination alpha test
     if (S.date) {
-        uint32_t d = ReadBuf(fpsm, fbp, fbw, x, y);
+        uint32_t d = S.hi ? FbWord(S, x, y) : ReadBuf(fpsm, fbp, fbw, x, y);
         bool bit = S.fb16 ? (d >> 15) & 1 : (d >> 31) & 1;
         if (bit != S.datm)
             return;
@@ -543,7 +564,7 @@ inline void PutPixel(const DrawState &S, int x, int y, Pixel p)
         uint32_t zt = S.ztst;
         uint32_t z = std::min(p.z, S.zmax);
         if (zpsm == Z32 || zpsm == Z24) {
-            uint32_t &w = Word(Addr32(zbp, fbw, x, y, 0x18));
+            uint32_t &w = ZWord(S, x, y);
             if (zt != 1) {
                 uint32_t d = zpsm == Z24 ? w & 0xFFFFFF : w;
                 if (zt == 0 || (zt == 2 && z < d) || (zt == 3 && z <= d))
@@ -564,7 +585,7 @@ inline void PutPixel(const DrawState &S, int x, int y, Pixel p)
     if (!writeFb)
         return;
     bool fb16 = S.fb16;
-    uint32_t *fb32 = fpsm == CT32 ? &Word(Addr32(fbp, fbw, x, y)) : nullptr;
+    uint32_t *fb32 = fpsm == CT32 ? &FbWord(S, x, y) : nullptr;
     uint32_t dst = 0;
     bool needDst = S.at.abe || fbmsk;
     if (needDst)
@@ -616,7 +637,7 @@ int g_dbgX = -1, g_dbgY = -1;
 inline bool DepthFails(const DrawState &S, int x, int y, uint32_t pz)
 {
     uint32_t z = std::min(pz, S.zmax);
-    uint32_t w = Word(Addr32(S.zbp, S.fbw, x, y, 0x18));
+    uint32_t w = ZWord(S, x, y);
     uint32_t d = S.zpsm == Z24 ? w & 0xFFFFFF : w;
     return S.ztst == 2 ? z < d : z <= d;
 }
@@ -700,6 +721,7 @@ enum PrimKind : uint8_t { P_POINT, P_LINE, P_TRI, P_SPRITE };
 
 struct Prim {
     uint8_t kind;
+    uint8_t hi;            // drawn into the high-resolution targets (g_hiStates)
     uint32_t state;
     int py0, py1;          // rows it may touch
     Vertex v[3];           // triangle: in drawing order (counter-clockwise)
@@ -932,6 +954,21 @@ GS_AVX2_INLINE __m128i Addr32x4(uint32_t bp, uint32_t bw, __m128i X, int y, int 
     return _mm_and_si128(a, _mm_set1_epi32(0xFFFFF));
 }
 
+// The frame and depth buffers' word indices (in S.mem) for four x on row y
+GS_AVX2_INLINE __m128i FbAddr4(const DrawState &S, __m128i X, int y)
+{
+    if (S.hi)
+        return _mm_add_epi32(_mm_set1_epi32((int)(S.hiFb + (uint32_t)y * S.hiStride)), X);
+    return Addr32x4(S.fbp, S.fbw, X, y, 0);
+}
+
+GS_AVX2_INLINE __m128i ZAddr4(const DrawState &S, __m128i X, int y)
+{
+    if (S.hi)
+        return _mm_add_epi32(_mm_set1_epi32((int)(S.hiZ + (uint32_t)y * S.hiStride)), X);
+    return Addr32x4(S.zbp, S.fbw, X, y, 1);
+}
+
 GS_AVX2_INLINE __m128i Gather(const uint32_t *base, __m128i idx)
 {
     return _mm_i32gather_epi32((const int *)base, idx, 4);
@@ -1093,22 +1130,31 @@ GS_AVX2_INLINE void Shade4(const DrawState &S, int x, int y, Quad q, __m128i zd,
             __m128i w = S.zpsm == Z24 ? _mm_or_si128(_mm_and_si128(zd, _mm_set1_epi32((int)0xFF000000)),
                                                      _mm_and_si128(z, _mm_set1_epi32(0xFFFFFF)))
                                       : z;
-            alignas(16) uint32_t ww[4], aa[4];
-            _mm_store_si128((__m128i *)ww, w);
-            _mm_store_si128((__m128i *)aa, za);
-            for (int k = 0; k < 4; k++)
-                if (zmask & (1 << k))
-                    ((uint32_t *)g_vram)[aa[k]] = ww[k];
+            if (S.hi) {
+                // the twin's four words are side by side (and the row is
+                // this worker's): one load, blend, store
+                __m128i *p = (__m128i *)(S.mem + (uint32_t)_mm_cvtsi128_si32(za));
+                _mm_storeu_si128(p, _mm_blendv_epi8(_mm_loadu_si128(p), w, zw));
+            } else {
+                alignas(16) uint32_t ww[4], aa[4];
+                _mm_store_si128((__m128i *)ww, w);
+                _mm_store_si128((__m128i *)aa, za);
+                for (int k = 0; k < 4; k++)
+                    if (zmask & (1 << k))
+                        ((uint32_t *)S.mem)[aa[k]] = ww[k];
+            }
         }
     }
     int fmask = _mm_movemask_ps(_mm_castsi128_ps(fw));
     if (!fmask)
         return;
     __m128i X = _mm_add_epi32(_mm_set1_epi32(x), _mm_setr_epi32(0, 1, 2, 3));
-    __m128i fa = Addr32x4(S.fbp, S.fbw, X, y, 0);
+    __m128i fa = FbAddr4(S, X, y);
     bool anyRgbOnly = !_mm_testz_si128(rgbOnly, rgbOnly);
     bool needDst = ABE || S.fbmsk || anyRgbOnly;
-    __m128i dst = needDst ? _mm_mask_i32gather_epi32(zero, (const int *)g_vram, fa, fw, 4) : zero;
+    __m128i dst = !needDst ? zero
+                  : S.hi ? _mm_loadu_si128((const __m128i *)(S.mem + (uint32_t)_mm_cvtsi128_si32(fa)))
+                         : _mm_mask_i32gather_epi32(zero, (const int *)S.mem, fa, fw, 4);
     if constexpr (ABE) {
         // lanes blended: all, or with PABE those with A >= 0x80
         __m128i bm = S.pabeOn ? _mm_cmpgt_epi32(a, _mm_set1_epi32(0x7F)) : ones;
@@ -1142,12 +1188,17 @@ GS_AVX2_INLINE void Shade4(const DrawState &S, int x, int y, Quad q, __m128i zd,
     __m128i out = _mm_or_si128(_mm_or_si128(r, _mm_slli_epi32(g, 8)), _mm_or_si128(_mm_slli_epi32(b, 16), _mm_slli_epi32(av, 24)));
     __m128i mask = _mm_or_si128(_mm_set1_epi32((int)S.fbmsk), _mm_and_si128(rgbOnly, _mm_set1_epi32((int)0xFF000000)));
     out = _mm_or_si128(_mm_and_si128(dst, mask), _mm_andnot_si128(mask, out));
+    if (S.hi) {
+        __m128i *p = (__m128i *)(S.mem + (uint32_t)_mm_cvtsi128_si32(fa));
+        _mm_storeu_si128(p, _mm_blendv_epi8(_mm_loadu_si128(p), out, fw));
+        return;
+    }
     alignas(16) uint32_t oo[4], aa[4];
     _mm_store_si128((__m128i *)oo, out);
     _mm_store_si128((__m128i *)aa, fa);
     for (int k = 0; k < 4; k++)
         if (fmask & (1 << k))
-            ((uint32_t *)g_vram)[aa[k]] = oo[k];
+            ((uint32_t *)S.mem)[aa[k]] = oo[k];
 }
 
 // The early depth test for a quad: narrows q.m; zd, za the buffer's words
@@ -1158,8 +1209,9 @@ GS_AVX2_INLINE bool DepthTest4(const DrawState &S, int x, int y, Quad &q, __m128
     if constexpr (!ZTE)
         return true;
     __m128i X = _mm_add_epi32(_mm_set1_epi32(x), _mm_setr_epi32(0, 1, 2, 3));
-    za = Addr32x4(S.zbp, S.fbw, X, y, 1);
-    zd = _mm_mask_i32gather_epi32(_mm_setzero_si128(), (const int *)g_vram, za, q.m, 4);
+    za = ZAddr4(S, X, y);
+    zd = S.hi ? _mm_loadu_si128((const __m128i *)(S.mem + (uint32_t)_mm_cvtsi128_si32(za)))
+              : _mm_mask_i32gather_epi32(_mm_setzero_si128(), (const int *)S.mem, za, q.m, 4);
     __m128i z = _mm_min_epu32(q.z, _mm_set1_epi32((int)S.zmax));
     __m128i d = S.zpsm == Z24 ? _mm_and_si128(zd, _mm_set1_epi32(0xFFFFFF)) : zd;
     const __m128i sgn = _mm_set1_epi32((int)0x80000000);
@@ -1326,9 +1378,11 @@ inline int FastIndex(const DrawState &S)
     return S.at.tme | S.at.iip << 1 | S.at.fge << 2 | S.zte << 3 | S.blend << 4;
 }
 
+extern DrawState *const g_hiStates;
+
 void Raster(const Prim &pr, Rows rows)
 {
-    const DrawState &S = g_states[pr.state];
+    const DrawState &S = pr.hi ? g_hiStates[pr.state] : g_states[pr.state];
     switch (pr.kind) {
     case P_POINT: RasterPoint(pr, S, rows); break;
     case P_LINE: RasterLine(pr, S, rows); break;
@@ -1577,8 +1631,12 @@ void AddWrite(Range r, uint64_t layout)
 
 // The parser is about to read (or write) r outside the drawing: wait for
 // the primitives in flight that draw to it (or read it).
+void HiTouched(const Range &r);
+
 void Hazard(const Range &r, bool write)
 {
+    if (write)
+        HiTouched(r);  // a transfer into a buffer that has a high-resolution twin
     if (g_pendW.empty() && !g_pendRAny)
         return;
     for (const WriteRange &o : g_pendW)
@@ -1926,6 +1984,8 @@ uint32_t CurrentState(const Attr &at)
     S.fogg = Bits(g.fogcol, 8, 8);
     S.fogb = Bits(g.fogcol, 16, 8);
     S.fast = g_fastOk && S.fpsm == CT32 && !S.date && (!S.zte || S.zpsm == Z32 || S.zpsm == Z24);
+    S.mem = (const uint32_t *)g_vram;
+    S.hi = false;
     // the memory it reads and draws to
     StateRanges &R = g_stateRanges[id];
     Scissor sc = GetScissor(c);
@@ -1955,11 +2015,16 @@ uint32_t CurrentState(const Attr &at)
 // draws).
 bool g_xferChecked;  // a transfer's destination checked against the drawing
 
-void Submit(Prim &pr)
+uint32_t g_hiFilledFor = ~0u;  // the state g_hiStates holds the twin of
+void Enqueue(const Prim &pr);
+
+// true: drawn here, not queued.
+bool SubmitNative(Prim &pr)
 {
     uint32_t id = pr.state;
     g_xferChecked = false;
     if (g_rangesAddedFor != id) {
+        g_hiFilledFor = ~0u;  // S.tex may change below
         const StateRanges &R = g_stateRanges[id];
         DrawState &S = g_states[id];
         // copies of what it draws over are stale
@@ -1972,7 +2037,7 @@ void Submit(Prim &pr)
             S.tex = nullptr;
             g_curTex = nullptr;
             Raster(pr, {1, 0});
-            return;
+            return true;
         }
         Wait conflict = W_COUNT;
         for (const WriteRange &o : g_pendW) {
@@ -2009,8 +2074,15 @@ void Submit(Prim &pr)
     }
     if (g_nWorkers <= 0) {
         Raster(pr, {1, 0});
-        return;
+        return true;
     }
+    Enqueue(pr);
+    return false;
+}
+
+// Queues a primitive for the workers.
+void Enqueue(const Prim &pr)
+{
     if (g_curTex)
         g_curTex->lastUse = g_next + 1;
     // room in the ring
@@ -2030,6 +2102,275 @@ void Submit(Prim &pr)
     g_next++;
     if ((g_next & 255) == 0)
         Publish();
+}
+
+void SetupSprite(Prim &pr, const DrawState &S);
+bool SetupTriangle(Prim &pr, const Vertex &a, const Vertex &b, const Vertex &cc, const DrawState &S);
+
+// ---- High resolution --------------------------------------------------------
+//
+// At N > 1 (gs_set_hires) every primitive drawn into a full-width 32-bit
+// frame buffer is drawn twice: into local memory as always, so whatever the
+// game reads back or textures from is what the PS2 had (the water reads the
+// frame and depth buffers), and again, its coordinates and scissor times N,
+// into a twin of that buffer N times as large in each direction, with a
+// twin of its depth buffer. gs_read_display shows the twin. The textures
+// are the same ones, so the twin is the same picture with N * N samples
+// where there was one.
+//
+// A twin is made the first time its buffer is drawn to, filled from local
+// memory; and filled again from it (stale) when something reached the
+// buffer that the twin didn't see: a transfer, or a primitive in a format
+// the twins don't have (16-bit frames, Z16).
+const int kHiW = 640, kHiH = 512;   // a buffer's pixels at 1x
+const int kHiColor = 4, kHiZ = 2;   // twins kept: frame buffers, depth buffers
+std::atomic<int> g_hiWanted{1};
+int g_hiScale = 1;
+size_t g_hiWords;                   // one twin's words
+
+struct HiSlot {
+    uint32_t bp;
+    bool used, stale;
+    uint64_t lastUse;
+};
+HiSlot g_hiSlots[kHiColor + kHiZ];
+uint64_t g_hiUse;
+DrawState *const g_hiStates = BigArray<DrawState>(kStates);
+
+Range HiRange(const HiSlot &s, bool z)
+{
+    return BufRange(z ? Z32 : CT32, s.bp, 10, 0, kHiW - 1, 0, 447);
+}
+
+const char *g_hiWhy = "transfer";  // PORT_HIRES_LOG: what HiTouched is called for
+const bool g_hiLog = getenv("PORT_HIRES_LOG") != nullptr;
+
+void HiTouched(const Range &r)
+{
+    if (g_hiScale <= 1)
+        return;
+    for (int i = 0; i < kHiColor + kHiZ; i++)
+        if (g_hiSlots[i].used && !g_hiSlots[i].stale && HiRange(g_hiSlots[i], i >= kHiColor).Overlaps(r)) {
+            g_hiSlots[i].stale = true;
+            static int n;
+            if (g_hiLog && n++ < 12)
+                port_log("GS hires: twin %d (bp %u) stale: %s", i, g_hiSlots[i].bp, g_hiWhy);
+        }
+}
+
+// Fill twin i from its buffer in local memory, each pixel N by N.
+void HiFill(int i)
+{
+    Barrier(W_DISPLAY);
+    HiSlot &s = g_hiSlots[i];
+    // PORT_HIRES_LOG=1: how often twins are refilled (each costs a barrier
+    // and a buffer's copy, and puts 1x pixels in the twin)
+    static uint64_t fills[kHiColor + kHiZ], lastFrame;
+    if (g_hiLog) {
+        fills[i]++;
+        if (g_frameSeq >= lastFrame + 300) {
+            port_log("GS hires: fills in %llu frames: colour %llu %llu %llu %llu, depth %llu %llu",
+                     (unsigned long long)(g_frameSeq - lastFrame), (unsigned long long)fills[0], (unsigned long long)fills[1],
+                     (unsigned long long)fills[2], (unsigned long long)fills[3], (unsigned long long)fills[4],
+                     (unsigned long long)fills[5]);
+            memset(fills, 0, sizeof fills);
+            lastFrame = g_frameSeq;
+        }
+    }
+    const int N = g_hiScale, stride = kHiW * N;
+    uint32_t *out = g_hiMem + (size_t)i * g_hiWords;
+    const uint32_t zx = i >= kHiColor ? 0x18 : 0;
+    for (int y = 0; y < kHiH; y++) {
+        uint32_t *row = out + (size_t)y * N * stride;
+        for (int x = 0; x < kHiW; x++) {
+            uint32_t v = Word(Addr32(s.bp, 10, x, y, zx));
+            for (int k = 0; k < N; k++)
+                row[x * N + k] = v;
+        }
+        for (int k = 1; k < N; k++)
+            memcpy(row + (size_t)k * stride, row, (size_t)stride * 4);
+    }
+    s.stale = false;
+}
+
+// The twin of the frame (z false) or depth buffer at bp, made if need be,
+// up to date; -1 with create false if there is none. overwrite: what is
+// about to be drawn replaces all of it (a clear), so a stale twin needn't
+// be filled first.
+int HiSlotFor(uint32_t bp, bool z, bool create, bool overwrite = false)
+{
+    int first = z ? kHiColor : 0, n = z ? kHiZ : kHiColor, lru = first;
+    for (int i = first; i < first + n; i++) {
+        HiSlot &s = g_hiSlots[i];
+        if (s.used && s.bp == bp) {
+            s.lastUse = ++g_hiUse;
+            if (s.stale && overwrite)
+                s.stale = false;
+            else if (s.stale)
+                HiFill(i);
+            return i;
+        }
+        if (!s.used || (g_hiSlots[lru].used && s.lastUse < g_hiSlots[lru].lastUse))
+            lru = i;
+    }
+    if (!create)
+        return -1;
+    HiSlot &s = g_hiSlots[lru];
+    if (s.used)
+        Barrier(W_DISPLAY);  // primitives in flight still draw into it
+    s = {bp, true, true, ++g_hiUse};
+    g_hiFilledFor = ~0u;
+    if (overwrite)
+        s.stale = false;
+    else
+        HiFill(lru);
+    return lru;
+}
+
+// The scale asked for takes effect between frames (the GS thread, at FINISH).
+void HiApplyScale()
+{
+    int want = std::clamp(g_hiWanted.load(std::memory_order_relaxed), 1, 3);
+    if (want == g_hiScale)
+        return;
+    Barrier(W_DISPLAY);
+    if (g_hiMem)
+        port_unmap(g_hiMem, (g_hiWords * (kHiColor + kHiZ) + 64) * 4);
+    g_hiMem = nullptr;
+    g_hiScale = want;
+    g_hiFilledFor = ~0u;
+    for (HiSlot &s : g_hiSlots)
+        s = {};
+    if (want > 1) {
+        g_hiWords = (size_t)kHiW * want * kHiH * want;
+        // (and a few words past the last row: the fast path loads four at a time)
+        g_hiMem = BigArray<uint32_t>(g_hiWords * (kHiColor + kHiZ) + 64);
+    }
+    port_log("GS: internal resolution %dx (%dx%d)", want, kHiW * want, 448 * want);
+}
+
+// The primitive again for its buffer's twin. direct: SubmitNative drew it
+// here (after a barrier) instead of queueing it.
+void SubmitHi(const Prim &pr, bool direct)
+{
+    const int N = g_hiScale;
+    const uint32_t id = pr.state;
+    const DrawState &S = g_states[id];
+    const StateRanges &R = g_stateRanges[id];
+    if (S.fbw != 10)
+        return;  // a render target of its own size: local memory only
+    if (S.fpsm != CT32 || (S.zte && S.zpsm != Z32 && S.zpsm != Z24)) {
+        static char why[96];
+        if (g_hiLog)
+            snprintf(why, sizeof why, "primitive fpsm %x zpsm %x fbp %u zbp %u zte %d", S.fpsm, S.zpsm, S.fbp, S.zbp, S.zte);
+        g_hiWhy = g_hiLog ? why : "primitive";
+        HiTouched(R.fb);
+        if (R.hasZ)
+            HiTouched(R.z);
+        g_hiWhy = "transfer";
+        return;
+    }
+    // A sprite over the whole picture that replaces what is there: a clear.
+    // Its alpha test either always passes, or never does and then writes
+    // just the buffer being cleared (AFAIL: 1 the frame only, 2 depth only),
+    // which is how the game clears its depth buffer.
+    bool whole = pr.kind == P_SPRITE && pr.px0 <= 0 && pr.px1 >= kHiW - 1 && pr.py0 <= 0 && pr.py1 >= 447 && !S.date;
+    bool passes = !S.ate || S.atst == 1;
+    bool fbOnly = S.ate && S.atst == 0 && S.afail == 1, zOnly = S.ate && S.atst == 0 && S.afail == 2;
+    bool clearsFb = whole && (passes || fbOnly) && !S.blend && !S.fbmsk && (!S.zte || S.ztst == 1);
+    bool clearsZ = whole && (passes || zOnly) && S.zte && S.ztst == 1 && S.zwrite;
+    if (g_hiLog) {
+        static int n;
+        for (int i = 0; i < kHiColor + kHiZ; i++)
+            if (g_hiSlots[i].used && g_hiSlots[i].stale && n < 12 &&
+                g_hiSlots[i].bp == (i >= kHiColor ? S.zbp : S.fbp) && (i < kHiColor || S.zte)) {
+                n++;
+                port_log("GS hires: twin %d filled for kind %d x %d-%d y %d-%d fbp %u zbp %u zte %d ztst %d zwrite %d ate %d "
+                         "blend %d fbmsk %x",
+                         i, pr.kind, pr.px0, pr.px1, pr.py0, pr.py1, S.fbp, S.zbp, S.zte, S.ztst, S.zwrite, S.ate, S.blend,
+                         S.fbmsk);
+            }
+    }
+    int cs = HiSlotFor(S.fbp, false, true, clearsFb);
+    int zs = S.zte ? HiSlotFor(S.zbp, true, true, clearsZ) : -1;
+    DrawState &H = g_hiStates[id];
+    if (g_hiFilledFor != id) {
+        H = S;
+        H.hi = true;
+        H.mem = g_hiMem;
+        H.hiStride = kHiW * N;
+        H.hiFb = (uint32_t)((size_t)cs * g_hiWords);
+        H.hiZ = zs >= 0 ? (uint32_t)((size_t)zs * g_hiWords) : 0;
+        Scissor sc = GetScissor(S.c);
+        uint64_t x0 = std::min(sc.x0 * N, kHiW * N - 1), x1 = std::min((sc.x1 + 1) * N - 1, kHiW * N - 1);
+        uint64_t y0 = std::min(sc.y0 * N, kHiH * N - 1), y1 = std::min((sc.y1 + 1) * N - 1, kHiH * N - 1);
+        H.c.scissor = x0 | x1 << 16 | y0 << 32 | y1 << 48;
+        g_hiFilledFor = id;
+    }
+    auto emit = [&](const Prim &h) {
+        if (direct || g_nWorkers <= 0)
+            Raster(h, {1, 0});
+        else
+            Enqueue(h);
+    };
+    auto scaled = [N](Vertex v) {
+        v.x *= N;
+        v.y *= N;
+        return v;
+    };
+    Prim h = pr;
+    h.hi = 1;
+    switch (pr.kind) {
+    case P_TRI: {
+        Vertex a = scaled(pr.v[0]), b = scaled(pr.v[1]), c = scaled(pr.v[2]);
+        if (!SetupTriangle(h, a, b, c, H))
+            return;
+        h.lr = pr.lr; h.lg = pr.lg; h.lb = pr.lb; h.la = pr.la;  // (the vertices are in drawing order here)
+        emit(h);
+        break;
+    }
+    case P_SPRITE:
+        h.v[0] = scaled(pr.v[0]);
+        h.v[1] = scaled(pr.v[1]);
+        SetupSprite(h, H);
+        if (h.py0 <= h.py1)
+            emit(h);
+        break;
+    case P_POINT:
+        // a point is a pixel: N by N of the twin's
+        for (int dy = 0; dy < N; dy++)
+            for (int dx = 0; dx < N; dx++) {
+                h.v[0] = scaled(pr.v[0]);
+                h.v[0].x += dx * 16;
+                h.v[0].y += dy * 16;
+                h.py0 = h.py1 = h.v[0].y >> 4;
+                emit(h);
+            }
+        break;
+    case P_LINE: {
+        // a line is a pixel wide: N of the twin's, side by side
+        bool flat = std::abs(pr.v[1].x - pr.v[0].x) >= std::abs(pr.v[1].y - pr.v[0].y);
+        for (int k = 0; k < N; k++) {
+            h.v[0] = scaled(pr.v[0]);
+            h.v[1] = scaled(pr.v[1]);
+            (flat ? h.v[0].y : h.v[0].x) += k * 16;
+            (flat ? h.v[1].y : h.v[1].x) += k * 16;
+            h.py0 = std::min(h.v[0].y, h.v[1].y) >> 4;
+            h.py1 = std::max(h.v[0].y, h.v[1].y) >> 4;
+            emit(h);
+        }
+        break;
+    }
+    }
+}
+
+// Queues a primitive (or draws it here), and its high-resolution twin.
+void Submit(Prim &pr)
+{
+    pr.hi = 0;
+    bool direct = SubmitNative(pr);
+    if (g_hiScale > 1)
+        SubmitHi(pr, direct);
 }
 
 void SetupSprite(Prim &pr, const DrawState &S)
@@ -2416,13 +2757,16 @@ void WriteReg(uint32_t reg, uint64_t v)
         // UI goes in after the FINISH), so a frame is complete when the next
         // FINISH comes, before DISPFB moves: that picture is frame seq, read
         // out only if the presenter wants it (a window, a screenshot).
+        HiApplyScale();
         if (DisplayOk()) {
             uint64_t seq = g_frameSeq + 1;
             if (port_video_want(seq)) {
-                PortFrame rgba;
+                PortFrame rgba = port_video_buffer();
                 int w, h;
                 if (gs_read_display(rgba, w, h))
                     port_video_frame(seq, std::move(rgba), w, h);
+                else
+                    port_video_recycle(std::move(rgba));
             }
             // a game frame (Flip) moves DISPFB; render-to-texture passes
             // and readbacks send FINISH too
@@ -2912,6 +3256,11 @@ bool DisplayOk()
 }
 } // namespace
 
+void gs_set_hires(int scale)
+{
+    g_hiWanted.store(scale, std::memory_order_relaxed);
+}
+
 bool gs_read_display(PortFrame &rgba, int &w, int &h)
 {
     volatile uint64_t *priv = (volatile uint64_t *)PORT_HW(0x12000000);
@@ -2930,6 +3279,24 @@ bool gs_read_display(PortFrame &rgba, int &w, int &h)
         ch = (int)Bits(display, 44, 11) + 1;
         if (cw <= 0 || ch <= 0 || cw > 2048 || ch > 2048)
             return false;
+        // the buffer's high-resolution twin, if it has one (it is up to date)
+        if (g_hiScale > 1 && fbw == 10 && (psm == CT32 || psm == CT24)) {
+            int slot = HiSlotFor(fbp, false, false);
+            const int N = g_hiScale, stride = kHiW * N;
+            if (slot >= 0 && (int)dbx + cw <= kHiW && (int)dby + ch <= kHiH) {
+                const uint32_t *src = g_hiMem + (size_t)slot * g_hiWords;
+                out.resize((size_t)cw * N * ch * N);
+                for (int y = 0; y < ch * N; y++) {
+                    const uint32_t *in = src + (size_t)(dby * N + y) * stride + dbx * N;
+                    uint32_t *row = &out[(size_t)y * cw * N];
+                    for (int x = 0; x < cw * N; x++)
+                        row[x] = in[x] | 0xFF000000;
+                }
+                cw *= N;
+                ch *= N;
+                return true;
+            }
+        }
         out.resize(cw * ch);
         for (int y = 0; y < ch; y++) {
             uint32_t *row = &out[y * cw];
