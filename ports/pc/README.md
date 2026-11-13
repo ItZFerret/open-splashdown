@@ -87,6 +87,7 @@ What differs off Linux (`os.cpp`, `lowheap.cpp`, `nodebug.cpp`): the game's heap
 |---|---|
 | Aspect ratio | 4:3 Original, 16:9 Widescreen, 16:10, 21:9 Ultrawide, Fill window |
 | Resolution | 1x (640x448), 2x (1280x896), 3x (1920x1344): the internal resolution |
+| Renderer | Software, GPU (experimental; applies at the next start) |
 | Display | Windowed, Fullscreen (borderless, the desktop's resolution) |
 | Window size | 1x to 4x the game's 448 lines |
 | Scaling | Smooth (linear), Sharp (nearest), Integer (whole multiples) |
@@ -97,6 +98,22 @@ What differs off Linux (`os.cpp`, `lowheap.cpp`, `nodebug.cpp`): the game's heap
 Widescreen is a wider field of view, not a stretched picture: the game still renders 640x448 (the GS is the PS2's, in software), `ports/pc/game/widescreen_pc.cpp` widens the projection's horizontal field of view by the shape's ratio to 4:3, and the presenter shows the picture in that shape. Clipping and culling follow the projection; the near-water patch is widened to match (`PSXWaterDisplacement.cpp`, `SPLASHDOWN_PC`). The menus and the HUD are drawn in screen coordinates by the 2D microprograms; in widescreen their packets are scaled back to their own proportions on the way to the GS (`Squeeze2D`, `gs/gs.cpp`): a race's HUD about the nearer edge, so its panels stay in their corners, and a menu page about the centre, so its layout is kept; what spans the picture, and the bars along its top and bottom, still fill it. The animated water behind the menus is a 3D grid sized for 4:3, widened to match (`PSXUIWaterEffect.cpp`, `SPLASHDOWN_PC`). Movies and anything else sent to the GS directly are stretched with the picture. **Resolution** draws at 2 or 3 times 640x448 (`gs/gs.cpp`, "High resolution"). Every primitive aimed at a full-width 32-bit frame buffer is drawn twice: into the GS's local memory as always, so what the game reads back or textures from is what the PS2 had (the water reads the frame and depth buffers every frame), and again, coordinates and scissor scaled, into a twin of that buffer and of its depth buffer; the presenter is given the twin. Textures are the same ones, so it is the same picture with more samples: sharper edges and more texture detail in the distance, not new art. A twin is refilled from local memory when something reached its buffer that it didn't see (a transfer, a 16-bit format), unless a clear follows. Cost, in a 16:9 race on an M5 (native): 2x holds 30 FPS; 3x runs at about 26. `PORT_HIRES=2` sets it without a window; `PORT_HIRES_LOG=1` logs refills.
 
 For tests: `PORT_ASPECT=16:9` sets the field of view without a window (headless runs ignore `settings.ini`, so the golden session is unchanged); `PORT_OVERLAY_OPEN=1` starts with the menu open and `PORT_WINDOW_SHOT=out.png` saves what the window shows.
+
+## GPU renderer (experimental)
+
+`gpu.cpp` draws the picture the window shows on the graphics card, through SDL's GPU API, instead of the software GS's high-resolution twins. The software GS still draws everything at 1x into its local memory, which is what the game reads back and textures from; in GPU mode it also records each triangle and sprite aimed at a full-width frame buffer (`GpuRecord`, `gs/gs.cpp`) and hands the list to the presenter at every FINISH, which replays it into a colour and a depth texture per PS2 buffer at the Resolution setting and shows the displayed one. The window's SDL renderer runs on the same GPU device (`SDL_CreateGPURenderer`, SDL 3.4), so the F1 overlay and the aspect handling are unchanged.
+
+Where it stands:
+
+1. ✅ Geometry and the depth test: triangles and sprites in their vertex colours.
+2. ✅ Textures and the alpha test. The software GS's decoded copies go to the GPU once each (a texture it reads from memory instead, too large for a copy or drawn over, is decoded per frame); the fragment shader reads texels by coordinate with the GS's wrap modes, bilinear filter and texture functions, S and T divided by Q per pixel. What AFAIL keeps of a pixel that fails the alpha test (colour only, depth only, RGB only) is drawn in a second pass over the same triangles that takes only those pixels.
+3. ✅ Blending, fog and exact depth. The GS's blend, (A - B) * C + D, runs on the GPU's blender: `BlendFor` (`gpu.cpp`) picks an operation and two factors for each form, and the shader multiplies the colour by C first where a factor can't (so source alpha and FIX above 0x80 work). Alpha is kept in the target with 0x80 as 1.0, which is what destination-alpha blends want. FBMSK becomes the colour write mask, fog is the vertex coefficient between the colour and FOGCOL. Depth is the buffer's word over 2^32 whatever its format (the game uses one buffer as Z24 and Z32); for flat primitives and those at the top of a 24-bit buffer the shader computes it as the GS does, the first vertex's Z plus the floor of the interpolated difference, because the game layers its HUD one step of Z apart and wipes its gauges with a quad whose Z crosses a layer's. Left out: PABE and the destination alpha test (the game uses neither; a log line says so if it ever does), COLCLAMP's wrap-around, lines and points, C above 1.0 where it is a destination factor, and the three blend forms whose destination factor would be 1 + C.
+4. ✅ Vulkan, for Windows and Linux. The shaders exist twice: Metal's as text in `gpu.cpp`, Vulkan's as GLSL in `shaders/`, compiled by `tools/port/shaders.py` (it needs `glslangValidator`) into `gpu_spirv.h`, which is checked in so that building needs no shader compiler; a change to one must be made to the other. The device is asked for either and the shaders follow what it takes. There are none for Direct3D 12, so Windows needs a graphics driver with Vulkan (any current one); without it the port logs why and shows the software picture. `PORT_GPU_DRIVER=vulkan` on macOS runs the Vulkan shaders through MoltenVK (`DYLD_LIBRARY_PATH` to its library), which is how they were tested: the same picture as Metal's. They have not been run on Windows or Linux themselves.
+5. Direct3D 12 shaders (DXIL), resolutions above 3x, anti-aliasing.
+
+`PORT_RENDERER=gpu` (or `software`) overrides the setting for a run. For comparing the two: with the GPU renderer in a window, every `PORT_SCREENSHOT` frame (the software GS's picture) gets what the window shows at that moment beside it, as `<name>_gpu.png`; `PORT_GPU_LOG=1` logs each kind of state the game draws with, once.
+
+One known difference is the software GS's: it cuts a triangle's interpolated Z off after summing three products in floating point, so a flat triangle's Z comes out one low at scattered pixels, and the speedometer's unlit arcs show through their mask as dots. The GPU renderer hides them.
 
 ## Controls
 
@@ -110,6 +127,7 @@ Keyboard: arrows (D-pad), WASD (left stick), IJKL (right stick), X or Space (Cro
 main.cpp, runtime.cpp   start-up, the game's thread, the port heap
 os.cpp                  the host OS: futexes, low memory, threads, paths
 settings.cpp, overlay.cpp  the port's display settings and their F1 menu
+gpu.cpp                 the GPU renderer (experimental, macOS)
 lowheap.cpp, nodebug.cpp  macOS and Windows: the game's heap; stand-ins
                         for the Linux-only watchdog and profiler
 ee/                     the EE inline-asm / VU0 macro interpreter
