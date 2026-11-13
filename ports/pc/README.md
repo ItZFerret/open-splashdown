@@ -87,6 +87,7 @@ What differs off Linux (`os.cpp`, `lowheap.cpp`, `nodebug.cpp`): the game's heap
 |---|---|
 | Aspect ratio | 4:3 Original, 16:9 Widescreen, 16:10, 21:9 Ultrawide, Fill window |
 | Resolution | 1x (640x448), 2x (1280x896), 3x (1920x1344): the internal resolution |
+| Renderer | Software, GPU (experimental; applies at the next start) |
 | Display | Windowed, Fullscreen (borderless, the desktop's resolution) |
 | Window size | 1x to 4x the game's 448 lines |
 | Scaling | Smooth (linear), Sharp (nearest), Integer (whole multiples) |
@@ -97,6 +98,19 @@ What differs off Linux (`os.cpp`, `lowheap.cpp`, `nodebug.cpp`): the game's heap
 Widescreen is a wider field of view, not a stretched picture: the game still renders 640x448 (the GS is the PS2's, in software), `ports/pc/game/widescreen_pc.cpp` widens the projection's horizontal field of view by the shape's ratio to 4:3, and the presenter shows the picture in that shape. Clipping and culling follow the projection; the near-water patch is widened to match (`PSXWaterDisplacement.cpp`, `SPLASHDOWN_PC`). The menus and the HUD are drawn in screen coordinates by the 2D microprograms; in widescreen their packets are scaled back to their own proportions on the way to the GS (`Squeeze2D`, `gs/gs.cpp`): a race's HUD about the nearer edge, so its panels stay in their corners, and a menu page about the centre, so its layout is kept; what spans the picture, and the bars along its top and bottom, still fill it. The animated water behind the menus is a 3D grid sized for 4:3, widened to match (`PSXUIWaterEffect.cpp`, `SPLASHDOWN_PC`). Movies and anything else sent to the GS directly are stretched with the picture. **Resolution** draws at 2 or 3 times 640x448 (`gs/gs.cpp`, "High resolution"). Every primitive aimed at a full-width 32-bit frame buffer is drawn twice: into the GS's local memory as always, so what the game reads back or textures from is what the PS2 had (the water reads the frame and depth buffers every frame), and again, coordinates and scissor scaled, into a twin of that buffer and of its depth buffer; the presenter is given the twin. Textures are the same ones, so it is the same picture with more samples: sharper edges and more texture detail in the distance, not new art. A twin is refilled from local memory when something reached its buffer that it didn't see (a transfer, a 16-bit format), unless a clear follows. Cost, in a 16:9 race on an M5 (native): 2x holds 30 FPS; 3x runs at about 26. `PORT_HIRES=2` sets it without a window; `PORT_HIRES_LOG=1` logs refills.
 
 For tests: `PORT_ASPECT=16:9` sets the field of view without a window (headless runs ignore `settings.ini`, so the golden session is unchanged); `PORT_OVERLAY_OPEN=1` starts with the menu open and `PORT_WINDOW_SHOT=out.png` saves what the window shows.
+
+## GPU renderer (in development)
+
+`gpu.cpp` draws the picture the window shows on the graphics card, through SDL's GPU API, instead of the software GS's high-resolution twins. The software GS still draws everything at 1x into its local memory, which is what the game reads back and textures from; in GPU mode it also records each triangle and sprite aimed at a full-width frame buffer (`GpuRecord`, `gs/gs.cpp`) and hands the list to the presenter at every FINISH, which replays it into a colour and a depth texture per PS2 buffer at the Resolution setting and shows the displayed one. The window's SDL renderer runs on the same GPU device (`SDL_CreateGPURenderer`, SDL 3.4), so the F1 overlay and the aspect handling are unchanged.
+
+Where it stands:
+
+1. ✅ Geometry and the depth test: untextured, unblended triangles and sprites in their vertex colours. Metal only (the shaders are MSL), so macOS.
+2. Textures.
+3. Blending, alpha test, fog.
+4. Other backends (SPIR-V and DXIL shaders), resolutions above 3x, anti-aliasing.
+
+Until stage 3 the picture is not playable: the setting is for development. `PORT_RENDERER=gpu` (or `software`) overrides it for a run.
 
 ## Controls
 
@@ -110,6 +124,7 @@ Keyboard: arrows (D-pad), WASD (left stick), IJKL (right stick), X or Space (Cro
 main.cpp, runtime.cpp   start-up, the game's thread, the port heap
 os.cpp                  the host OS: futexes, low memory, threads, paths
 settings.cpp, overlay.cpp  the port's display settings and their F1 menu
+gpu.cpp                 the GPU renderer (in development)
 lowheap.cpp, nodebug.cpp  macOS and Windows: the game's heap; stand-ins
                         for the Linux-only watchdog and profiler
 ee/                     the EE inline-asm / VU0 macro interpreter

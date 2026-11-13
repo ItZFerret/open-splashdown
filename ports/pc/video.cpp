@@ -18,6 +18,7 @@
 #include "port.h"
 #include "port_os.h"
 
+#include "gpu.h"
 #include "gs/gs.h"
 #include "overlay.h"
 #include "settings.h"
@@ -105,6 +106,11 @@ struct Window {
     int tw = 0, th = 0;
     PortSettings applied;   // what the window was last set to
     double fps = 0;
+    // The GPU renderer (ports/pc/gpu.h) draws the picture: its texture and
+    // the part of it on display, instead of the software GS's frames.
+    bool gpu = false;
+    SDL_Texture *gpuTexture = nullptr;
+    SDL_FRect gpuSrc = {};
 
     // The window for a picture windowScale * 448 lines high in the
     // setting's shape (Fill window: 16:9 to start with).
@@ -129,14 +135,22 @@ struct Window {
             port_log("video: no window (%s): running headless", SDL_GetError());
             return false;
         }
-        renderer = SDL_CreateRenderer(window, nullptr);
+        // PORT_RENDERER=gpu or software overrides the setting
+        const char *env = getenv("PORT_RENDERER");
+        bool wantGpu = env ? !strcmp(env, "gpu") : s.renderer != 0;
+        if (wantGpu) {
+            renderer = port_gpu_start(window, s.resolution);
+            gpu = renderer != nullptr;
+        }
+        if (!renderer)
+            renderer = SDL_CreateRenderer(window, nullptr);
         if (!renderer) {
             port_log("video: no renderer (%s): running headless", SDL_GetError());
             return false;
         }
         SDL_SetRenderVSync(renderer, s.vsync ? 1 : 0);
         port_skip_intro_set(s.skipIntro != 0);
-        gs_set_hires(s.resolution);
+        gs_set_hires(gpu ? 1 : s.resolution);   // the GPU draws the large picture itself
         applied = s;
         port_log("video: %s renderer; F1 opens the settings", SDL_GetRendererName(renderer));
         return true;
@@ -157,7 +171,9 @@ struct Window {
         if (s.vsync != applied.vsync)
             SDL_SetRenderVSync(renderer, s.vsync ? 1 : 0);
         port_skip_intro_set(s.skipIntro != 0);
-        gs_set_hires(s.resolution);
+        gs_set_hires(gpu ? 1 : s.resolution);
+        if (gpuTexture)
+            SDL_SetTextureScaleMode(gpuTexture, s.scaling == kScaleSmooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
         if (texture)
             SDL_SetTextureScaleMode(texture, s.scaling == kScaleSmooth ? SDL_SCALEMODE_LINEAR : SDL_SCALEMODE_NEAREST);
         applied = s;
@@ -195,13 +211,15 @@ struct Window {
             aw = ah * aspect;
         }
         // (whole multiples of the game's own lines, whatever it is drawn at)
-        int lines = th / std::max(1, s.resolution);
+        int lines = gpu ? 448 : th / std::max(1, s.resolution);
         if (s.scaling == kScaleInteger && lines > 0 && ah >= lines) {
             ah = (float)((int)ah / lines * lines);
             aw = ah * aspect;
         }
         SDL_FRect dst = {(ww - aw) / 2, (wh - ah) / 2, aw, ah};
-        if (texture)
+        if (gpu && gpuTexture)
+            SDL_RenderTexture(renderer, gpuTexture, &gpuSrc, &dst);
+        else if (texture)
             SDL_RenderTexture(renderer, texture, nullptr, &dst);
         port_overlay_draw(renderer, ww, wh, fps);
         // PORT_WINDOW_SHOT=out.png (testing the overlay): save what the
@@ -264,8 +282,8 @@ bool port_video_want(uint64_t seq)
         return false;
     if (Screenshot(seq))
         return true;
-    if (V.headless)
-        return false;
+    if (V.headless || port_gpu_active())
+        return false;   // (the GPU renderer shows its own picture)
     std::lock_guard lock(V.mutex);
     return !V.presentPending;
 }
@@ -368,9 +386,19 @@ void port_video_run(volatile bool *done)
             port_input_poll();
         }
         bool presented = false;
+        if (!headless && win.gpu) {
+            SDL_Texture *before = win.gpuTexture;
+            if (port_gpu_pump(win.renderer, &win.gpuTexture, &win.gpuSrc)) {
+                if (win.gpuTexture != before)
+                    SDL_SetTextureScaleMode(win.gpuTexture, port_settings().scaling == kScaleSmooth ? SDL_SCALEMODE_LINEAR
+                                                                                                    : SDL_SCALEMODE_NEAREST);
+                win.Draw();
+                presented = true;
+            }
+        }
         for (size_t i = 0; i < got.size(); i++) {
             Shot &f = got[i];
-            if (!headless && i + 1 == got.size()) {
+            if (!headless && !win.gpu && i + 1 == got.size()) {
                 win.Present(f.rgba.data(), f.w, f.h);
                 presented = true;
                 std::lock_guard lock(V.mutex);

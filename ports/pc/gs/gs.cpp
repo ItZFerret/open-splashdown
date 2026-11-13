@@ -11,6 +11,8 @@
 // other than 32/16/8 bits.
 #include "gs.h"
 
+#include "gpu.h"
+
 #include "port.h"
 #include "port_ptr32.h"
 #include "gs_tables.h"
@@ -2364,13 +2366,122 @@ void SubmitHi(const Prim &pr, bool direct)
     }
 }
 
-// Queues a primitive (or draws it here), and its high-resolution twin.
+// ---- The GPU's copy ---------------------------------------------------------
+//
+// With the GPU renderer on (ports/pc/gpu.h) each triangle and sprite aimed
+// at a full-width 32-bit frame buffer is also recorded, as triangles in the
+// buffer's 1x pixels with the state the GPU needs, and the list goes to the
+// presenter at every FINISH. Geometry edges are left where the PS2 has
+// them: a GS pixel is taken as the square from its coordinate to the next,
+// so a sprite covers the same squares at any resolution.
+GpuFrame g_gpuFrame;
+
+void GpuRecord(const Prim &pr)
+{
+    const DrawState &S = g_states[pr.state];
+    if (S.fbw != 10 || S.fpsm != CT32 || (pr.kind != P_TRI && pr.kind != P_SPRITE))
+        return;
+    GpuDraw d = {};
+    d.fbp = S.fbp;
+    d.zbp = S.zbp;
+    d.cwrite = 1;
+    d.zwrite = S.zwrite;
+    // an alpha test that never passes: AFAIL says what is written anyway
+    if (S.ate && S.atst == 0) {
+        if (S.afail == 0)
+            return;
+        if (S.afail == 2)
+            d.cwrite = 0;
+        else
+            d.zwrite = 0;
+    }
+    if (!S.zte) {
+        d.ztest = 0;
+        d.zwrite = 0;
+    } else if (S.ztst == 0) {
+        return;
+    } else {
+        d.ztest = (uint8_t)S.ztst;   // 1 always, 2 >=, 3 >
+    }
+    if (!d.cwrite && !d.zwrite)
+        return;
+    Scissor sc = GetScissor(S.c);
+    d.sx0 = (uint16_t)std::min(sc.x0, 639);
+    d.sx1 = (uint16_t)std::min(sc.x1, 639);
+    d.sy0 = (uint16_t)std::min(sc.y0, 511);
+    d.sy1 = (uint16_t)std::min(sc.y1, 511);
+    if (d.sx0 > d.sx1 || d.sy0 > d.sy1)
+        return;
+    std::vector<GpuVertex> &out = g_gpuFrame.verts;
+    d.first = (uint32_t)out.size();
+    const double zscale = 1.0 / (double)S.zmax;
+    auto depth = [&](uint32_t z) { return (float)(std::min(z, S.zmax) * zscale); };
+    auto colour = [](int r, int g, int b, int a) {
+        return (uint32_t)r | (uint32_t)g << 8 | (uint32_t)b << 16 | (uint32_t)a << 24;
+    };
+    if (pr.kind == P_TRI) {
+        for (int i = 0; i < 3; i++) {
+            const Vertex &v = pr.v[i];
+            uint32_t c = S.at.iip ? colour(v.r, v.g, v.b, v.a) : colour(pr.lr, pr.lg, pr.lb, pr.la);
+            out.push_back({v.x / 16.0f, v.y / 16.0f, depth(v.z), c});
+        }
+    } else {
+        const Vertex &a = pr.v[0], &b = pr.v[1];
+        float x0 = std::min(a.x, b.x) / 16.0f, x1 = std::max(a.x, b.x) / 16.0f;
+        float y0 = std::min(a.y, b.y) / 16.0f, y1 = std::max(a.y, b.y) / 16.0f;
+        float z = depth(b.z);
+        uint32_t c = colour(b.r, b.g, b.b, b.a);
+        const float q[6][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x0, y1}, {x1, y0}, {x1, y1}};
+        for (auto &p : q)
+            out.push_back({p[0], p[1], z, c});
+    }
+    d.count = (uint32_t)out.size() - d.first;
+    // one draw for a run in the same state
+    if (!g_gpuFrame.draws.empty()) {
+        GpuDraw &last = g_gpuFrame.draws.back();
+        if (last.fbp == d.fbp && last.zbp == d.zbp && last.ztest == d.ztest && last.zwrite == d.zwrite &&
+            last.cwrite == d.cwrite && last.sx0 == d.sx0 && last.sx1 == d.sx1 && last.sy0 == d.sy0 && last.sy1 == d.sy1 &&
+            last.first + last.count == d.first) {
+            last.count += d.count;
+            return;
+        }
+    }
+    g_gpuFrame.draws.push_back(d);
+}
+
+// FINISH: what was recorded since the last one goes to the presenter, with
+// the buffer on display if a picture is complete.
+void GpuFinish(bool present)
+{
+    GpuFrame f = std::move(g_gpuFrame);
+    g_gpuFrame = GpuFrame();
+    if (present) {
+        volatile uint64_t *priv = (volatile uint64_t *)PORT_HW(0x12000000);
+        uint64_t pmode = priv[0];
+        int n = (pmode & 2) ? 2 : 1;   // circuit 2 underneath, else circuit 1
+        uint64_t dispfb = priv[n == 1 ? 0x70 / 8 : 0x90 / 8], display = priv[n == 1 ? 0x80 / 8 : 0xA0 / 8];
+        uint32_t magh = Bits(display, 23, 4) + 1;
+        f.present = true;
+        f.dispFbp = Bits(dispfb, 0, 9) * 32;
+        f.dx = (int)Bits(dispfb, 32, 11);
+        f.dy = (int)Bits(dispfb, 43, 11);
+        f.dw = (int)((Bits(display, 32, 12) + magh) / magh);
+        f.dh = (int)Bits(display, 44, 11) + 1;
+    }
+    if (f.present || !f.draws.empty())
+        port_gpu_submit(std::move(f));
+}
+
+// Queues a primitive (or draws it here), its high-resolution twin, and the
+// GPU's copy.
 void Submit(Prim &pr)
 {
     pr.hi = 0;
     bool direct = SubmitNative(pr);
     if (g_hiScale > 1)
         SubmitHi(pr, direct);
+    if (port_gpu_active())
+        GpuRecord(pr);
 }
 
 void SetupSprite(Prim &pr, const DrawState &S)
@@ -2758,6 +2869,8 @@ void WriteReg(uint32_t reg, uint64_t v)
         // FINISH comes, before DISPFB moves: that picture is frame seq, read
         // out only if the presenter wants it (a window, a screenshot).
         HiApplyScale();
+        if (port_gpu_active())
+            GpuFinish(DisplayOk());
         if (DisplayOk()) {
             uint64_t seq = g_frameSeq + 1;
             if (port_video_want(seq)) {

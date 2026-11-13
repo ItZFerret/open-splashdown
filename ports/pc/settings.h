@@ -14,6 +14,7 @@ struct PortSettings {
     int vsync = 0;
     int showFps = 0;
     int resolution = 1;         // the GS draws at this many times 640x448, 1-3
+    int renderer = 0;           // 0 the software GS, 1 the GPU (ports/pc/gpu.h; at start-up)
     int skipIntro = 0;          // no publisher logos or intro movie at start-up
 };
 
