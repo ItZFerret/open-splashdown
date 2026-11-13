@@ -191,6 +191,9 @@ def compile_one(src, flags, tree_src):
     if rel == "src/tu/PSXMain.cpp":
         # The game's main runs on ports/pc/main.cpp's thread.
         flags = flags + ["-Dmain=splashdown_main"]
+    if rel == "src/tu/Math3d.cpp":
+        # Its ProjectionMatrix is wrapped by ports/pc/game/widescreen_pc.cpp.
+        flags = flags + ["-DProjectionMatrix=ProjectionMatrix_retail"]
     deps = [inp]
     # the command line, so a change of flags rebuilds
     stamp = obj + ".cmd"

@@ -35,6 +35,9 @@ void port_dma_poll(int ch);
    ...), which clears those set in v, atomically (write-1-to-clear: a plain
    store to the PC's register memory cleared the others too). */
 void port_gs_csr_ack(unsigned int v);
+/* ports/pc/settings.cpp: the projection's x scale for the picture's shape,
+   (4/3) / aspect: 1 at the original 4:3 (ports/pc/game/widescreen_pc.cpp). */
+float port_widescreen_scale(void);
 #ifdef __cplusplus
 }
 #endif

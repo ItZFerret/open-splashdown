@@ -286,14 +286,22 @@ void port_input_event(const void *event)
     g_gamepads = (int)g_open.size();
 }
 
+// While the settings overlay is open the game sees untouched pads.
+static bool g_blocked;
+
+void port_input_block(bool blocked)
+{
+    g_blocked = blocked;
+}
+
 void port_input_poll(void)
 {
     PortPad live[kMaxPads];
     for (int i = 0; i < kMaxPads; i++) {
-        live[i] = i < (int)g_open.size() ? GamepadState(g_open[i]) : Neutral();
+        live[i] = i < (int)g_open.size() && !g_blocked ? GamepadState(g_open[i]) : Neutral();
     }
     PortPad kb = Neutral();
-    Finish(kb, KeyboardBits());
+    Finish(kb, g_blocked ? 0 : KeyboardBits());
     Merge(live[0], kb);
     uint8_t small[kMaxPads], large[kMaxPads];
     {

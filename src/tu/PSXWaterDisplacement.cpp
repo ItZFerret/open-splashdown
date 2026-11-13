@@ -1204,6 +1204,17 @@ int PSXWaterDisplacement::FrustumIntersectPlane(_D3DVECTOR *point, _D3DVECTOR *n
     farHeight *= scale;
     midHeight *= scale;
     nearHeight *= scale;
+#ifdef SPLASHDOWN_PC
+    // Widescreen (ports/pc/settings.h): these are the frustum's half extents
+    // along `right`, from the 4:3 field of view; the projection is wider by
+    // 1 / port_widescreen_scale(), and the water patch must reach as far.
+    {
+        float wide = 1.0f / port_widescreen_scale();
+        farHeight *= wide;
+        midHeight *= wide;
+        nearHeight *= wide;
+    }
+#endif
     _D3DVECTOR right = Normalize(CrossProduct(camera->m_up, camera->m_lookAt));
     m_x3A0 = farWidth * camera->m_up;
     m_x3B0 = midWidth * camera->m_up;

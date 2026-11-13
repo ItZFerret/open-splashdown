@@ -97,6 +97,8 @@ struct PortPad {
 // state of keyboard and gamepads once per vblank.
 void port_input_event(const void *sdlEvent);
 void port_input_poll(void);
+// Main thread: the game sees neutral pads while blocked (the settings overlay).
+void port_input_block(bool blocked);
 // Game thread: pads connected (at least 1), pad n's state, its motors.
 int port_input_pads(void);
 void port_input_read(int pad, PortPad *out);

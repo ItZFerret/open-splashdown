@@ -60,6 +60,23 @@ The disc image is `$SPLASHDOWN_DISC`, else the command line's first argument (an
 
 What differs off Linux (`os.cpp`, `lowheap.cpp`, `nodebug.cpp`): the game's heap is the port's own allocator below 256 MB instead of glibc's brk heap; the executable is linked at 0x400000 without address randomization (macOS: a 4 KB `__PAGEZERO`, which only x86-64 allows, hence Rosetta); the hang watchdog, the sampling profiler and `PORT_HEAPGUARD` are Linux only.
 
+## Display settings and widescreen
+
+**F1** (or the gamepad's guide button, or both sticks pressed together) opens the port's settings over the game: Up/Down pick a row, Left/Right change it, Esc closes; the mouse works too. The game keeps running underneath and sees no input meanwhile. The settings are kept in `settings.ini` in the data directory (beside `memcard0/`).
+
+| Setting | Values |
+|---|---|
+| Aspect ratio | 4:3 Original, 16:9 Widescreen, 16:10, 21:9 Ultrawide, Fill window |
+| Display | Windowed, Fullscreen (borderless, the desktop's resolution) |
+| Window size | 1x to 4x the game's 448 lines |
+| Scaling | Smooth (linear), Sharp (nearest), Integer (whole multiples) |
+| VSync | Off, On |
+| FPS counter | Off, On |
+
+Widescreen is a wider field of view, not a stretched picture: the game still renders 640x448 (the GS is the PS2's, in software), `ports/pc/game/widescreen_pc.cpp` widens the projection's horizontal field of view by the shape's ratio to 4:3, and the presenter shows the picture in that shape. Clipping and culling follow the projection; the near-water patch is widened to match (`PSXWaterDisplacement.cpp`, `SPLASHDOWN_PC`). What doesn't go through a projection is stretched with the picture: the HUD, the menus and the movies. There is no higher internal resolution or anti-aliasing: that would take a different rasterizer.
+
+For tests: `PORT_ASPECT=16:9` sets the field of view without a window (headless runs ignore `settings.ini`, so the golden session is unchanged); `PORT_OVERLAY_OPEN=1` starts with the menu open and `PORT_WINDOW_SHOT=out.png` saves what the window shows.
+
 ## Controls
 
 Any SDL3 gamepad (Xbox, PlayStation, ...) in the standard layout works: the first one is player 1 and a second one is player 2 for Vs. Analog triggers and rumble work. Xbox A/B/X/Y are Cross/Circle/Square/Triangle, Menu is Start and View is Select.
@@ -71,6 +88,7 @@ Keyboard: arrows (D-pad), WASD (left stick), IJKL (right stick), X or Space (Cro
 ```
 main.cpp, runtime.cpp   start-up, the game's thread, the port heap
 os.cpp                  the host OS: futexes, low memory, threads, paths
+settings.cpp, overlay.cpp  the port's display settings and their F1 menu
 lowheap.cpp, nodebug.cpp  macOS and Windows: the game's heap; stand-ins
                         for the Linux-only watchdog and profiler
 ee/                     the EE inline-asm / VU0 macro interpreter

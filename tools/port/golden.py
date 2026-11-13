@@ -77,7 +77,7 @@ def run(outdir, frames, every, exe, audio=False):
         # The first reference was recorded before the sound driver
         #.
         env["PORT_NO_AUDIO"] = "1"
-    for k in ("PORT_GS_THREADS", "PORT_VU1_NOTIMING"):
+    for k in ("PORT_GS_THREADS", "PORT_VU1_NOTIMING", "PORT_ASPECT"):
         if k in os.environ:
             env[k] = os.environ[k]
     log = os.path.join(outdir, "run.log")
