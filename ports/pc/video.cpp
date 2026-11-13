@@ -226,7 +226,16 @@ struct Window {
         // window shows at its PORT_WINDOW_SHOT_DRAW'th draw (default 120)
         static const char *shot = getenv("PORT_WINDOW_SHOT");
         static long shotAt = EnvInt("PORT_WINDOW_SHOT_DRAW", 120), draws;
-        if (shot && ++draws == shotAt) {
+        // ... and with the GPU renderer, beside each PORT_SCREENSHOT frame
+        // (the software GS's picture) what the window shows then, as
+        // <name>_gpu.png: the two renderers at the same moment
+        bool both = !shotBeside.empty() && --shotBesideIn <= 0;
+        std::string besidePath;
+        if (both) {
+            besidePath.swap(shotBeside);
+            shot = besidePath.c_str();
+        }
+        if (shot && (both || ++draws == shotAt)) {
             if (SDL_Surface *raw = SDL_RenderReadPixels(renderer, nullptr)) {
                 if (SDL_Surface *rgba = SDL_ConvertSurface(raw, SDL_PIXELFORMAT_ABGR8888)) {
                     std::vector<uint32_t> px((size_t)rgba->w * rgba->h);
@@ -240,8 +249,12 @@ struct Window {
                 SDL_DestroySurface(raw);
             }
         }
+        if (both)
+            shot = getenv("PORT_WINDOW_SHOT");
         SDL_RenderPresent(renderer);
     }
+    std::string shotBeside;
+    int shotBesideIn = 0;
 
     void Present(const uint32_t *rgba, int w, int h)
     {
@@ -412,6 +425,12 @@ void port_video_run(volatile bool *done)
                 }
                 if (WritePng(path, f.rgba.data(), f.w, f.h))
                     port_log("video: frame %llu (%dx%d) saved to %s", (unsigned long long)f.seq, f.w, f.h, path.c_str());
+                if (!headless && win.gpu) {
+                    size_t dot = path.rfind(".png");
+                    path.insert(dot == std::string::npos ? path.size() : dot, "_gpu");
+                    win.shotBeside = path;
+                    win.shotBesideIn = 3;   // draws: the presenter is a frame or two behind
+                }
             }
         }
         if (V.exitFrame >= 0 && (long)seq >= V.exitFrame) {

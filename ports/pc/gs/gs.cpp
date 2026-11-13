@@ -650,9 +650,9 @@ inline bool DepthFails(const DrawState &S, int x, int y, uint32_t pz)
 inline void ShadePixel(const DrawState &S, int x, int y, Pixel p, float u, float v)
 {
     if (__builtin_expect(x == g_dbgX && y == g_dbgY, 0))
-        port_log("pixel %d,%d: flip %llu tex0 %llx uv %g,%g rgba %d,%d,%d,%d texel %08x", x, y,
+        port_log("pixel %d,%d: flip %llu tex0 %llx uv %g,%g rgba %d,%d,%d,%d texel %08x z %x (buffer %x)", x, y,
                  (unsigned long long)__atomic_load_n(&g_finishes, __ATOMIC_RELAXED), (unsigned long long)S.c.tex0, u, v,
-                 p.r, p.g, p.b, p.a, S.at.tme ? SampleTexture(S, u, v) : 0);
+                 p.r, p.g, p.b, p.a, S.at.tme ? SampleTexture(S, u, v) : 0, p.z, S.zte ? ReadBuf(S.zpsm, S.zbp, S.fbw, x, y) : 0);
     if (S.at.tme) {
         uint32_t t = SampleTexture(S, u, v);
         int tr = t & 255, tg = (t >> 8) & 255, tb = (t >> 16) & 255, ta = t >> 24;
@@ -2423,6 +2423,21 @@ uint64_t GpuTextureFor(uint32_t id, const DrawState &S, uint16_t &ox, uint16_t &
 void GpuRecord(const Prim &pr)
 {
     const DrawState &S = g_states[pr.state];
+    // PORT_GPU_LOG=1: each kind of state the game draws with, once
+    static const bool logging = getenv("PORT_GPU_LOG") != nullptr;
+    if (logging) {
+        static std::unordered_map<uint64_t, bool> seen;
+        uint64_t key = (uint64_t)pr.kind | (uint64_t)S.fbw << 4 | (uint64_t)S.fpsm << 12 | (uint64_t)S.blend << 20 | (uint64_t)S.ba << 21 |
+                       (uint64_t)S.bb << 23 | (uint64_t)S.bc << 25 | (uint64_t)S.bd << 27 | (uint64_t)S.ate << 29 | (uint64_t)S.atst << 30 |
+                       (uint64_t)S.afail << 33 | (uint64_t)S.date << 35 | (uint64_t)S.pabeOn << 36 | (uint64_t)S.fba << 37 |
+                       (uint64_t)S.at.fge << 38 | (uint64_t)(S.fbmsk != 0) << 39 | (uint64_t)S.zte << 40 | (uint64_t)S.ztst << 41 |
+                       (uint64_t)S.at.tme << 43 | (uint64_t)S.clamp << 44;
+        if (seen.try_emplace(key, true).second)
+            port_log("GPU state: kind %d fbp %u fbw %u psm %x abe %d (%d-%d)*%d+%d fix %02x ate %d atst %d afail %d date %d pabe %d fba %d "
+                     "fge %d fbmsk %08x zte %d ztst %d zwrite %d tme %d clamp %d",
+                     pr.kind, S.fbp, S.fbw, S.fpsm, S.blend, S.ba, S.bb, S.bc, S.bd, S.bfix, S.ate, S.atst, S.afail, S.date, S.pabeOn, S.fba,
+                     S.at.fge, S.fbmsk, S.zte, S.ztst, S.zwrite, S.at.tme, S.clamp);
+    }
     if (S.fbw != 10 || S.fpsm != CT32 || (pr.kind != P_TRI && pr.kind != P_SPRITE))
         return;
     GpuDraw d;
@@ -2445,6 +2460,42 @@ void GpuRecord(const Prim &pr)
         d.afail = S.afail;
         d.aref = (uint8_t)S.aref;
     }
+    // FBMSK: a channel all of whose bits are kept isn't written
+    for (int i = 0; i < 4; i++)
+        if (((S.fbmsk >> (i * 8)) & 0xFF) != 0xFF)
+            d.cmask |= 1 << i;
+    if (!d.cmask)
+        d.cwrite = 0;
+    if (d.cwrite) {
+        if (S.blend) {
+            d.abe = 1;
+            d.ba = (uint8_t)std::min<int>(S.ba, 2);
+            d.bb = (uint8_t)std::min<int>(S.bb, 2);
+            d.bc = (uint8_t)std::min<int>(S.bc, 2);
+            d.bd = (uint8_t)std::min<int>(S.bd, 2);
+            d.fix = d.bc == 2 ? (uint8_t)S.bfix : 0;
+            if (d.ba == d.bb) {   // (A - B) is nothing: D alone
+                d.ba = d.bb = 0;
+                d.bc = d.fix = 0;
+                if (d.bd == 0)
+                    d.abe = 0;
+            }
+        }
+        d.fba = S.fba;
+        if (S.at.fge) {
+            d.fge = 1;
+            d.fogr = (uint8_t)S.fogr;
+            d.fogg = (uint8_t)S.fogg;
+            d.fogb = (uint8_t)S.fogb;
+        }
+        static bool told;
+        if ((S.date || (S.blend && S.pabeOn)) && !told) {
+            told = true;
+            port_log("GPU: the game uses %s, which the GPU renderer leaves out", S.date ? "the destination alpha test" : "PABE");
+        }
+    } else {
+        d.cmask = 0;
+    }
     if (!S.zte) {
         d.ztest = 0;
         d.zwrite = 0;
@@ -2453,6 +2504,12 @@ void GpuRecord(const Prim &pr)
     } else {
         d.ztest = (uint8_t)S.ztst;   // 1 always, 2 >=, 3 >
     }
+    // Depth the GS's way, an integer cut off from what is interpolated,
+    // where a float's rounding would show: flat primitives and those at the
+    // top of a 24-bit buffer. (The game's HUD is layers a step of Z apart,
+    // and its gauges are wiped by a quad whose Z crosses a layer's.)
+    d.exactz = d.ztest && (pr.kind == P_SPRITE || (pr.v[0].z == pr.v[1].z && pr.v[1].z == pr.v[2].z) ||
+                           (S.zpsm != Z32 && std::max({pr.v[0].z, pr.v[1].z, pr.v[2].z}) >= 0xF00000));
     if (!d.cwrite && !d.zwrite)
         return;
     Scissor sc = GetScissor(S.c);
@@ -2480,8 +2537,9 @@ void GpuRecord(const Prim &pr)
     }
     std::vector<GpuVertex> &out = g_gpuFrame.verts;
     d.first = (uint32_t)out.size();
-    const double zscale = 1.0 / (double)S.zmax;
-    auto depth = [&](uint32_t z) { return (float)(std::min(z, S.zmax) * zscale); };
+    // depth: the buffer's word over 2^32 whatever its format (the game uses
+    // one buffer as both Z24 and Z32), so 24-bit values are exact in a float
+    auto depth = [&](uint32_t z) { return (float)(std::min(z, S.zmax) * (1.0 / 4294967296.0)); };
     auto colour = [](int r, int g, int b, int a) {
         return (uint32_t)r | (uint32_t)g << 8 | (uint32_t)b << 16 | (uint32_t)a << 24;
     };
@@ -2493,7 +2551,10 @@ void GpuRecord(const Prim &pr)
             // SetupTriangle's tu, tv, tq: texels (and 1) with UV coordinates,
             // else S, T and Q
             float ts = S.at.fst ? pr.tu[i] / tw : pr.tu[i], tt = S.at.fst ? pr.tv[i] / th : pr.tv[i];
-            out.push_back({v.x / 16.0f, v.y / 16.0f, depth(v.z), c, ts, tt, pr.tq[i]});
+            // (the first vertex's Z, and this one's from it: small numbers, which keep their fractions)
+            const uint32_t z0 = std::min(pr.v[0].z, S.zmax);
+            out.push_back({v.x / 16.0f, v.y / 16.0f, depth(v.z), c, ts, tt, pr.tq[i], v.f / 255.0f, (float)z0,
+                           (float)((int64_t)std::min(v.z, S.zmax) - (int64_t)z0)});
         }
     } else {
         const Vertex &a = pr.v[0], &b = pr.v[1];
@@ -2505,7 +2566,7 @@ void GpuRecord(const Prim &pr)
         auto v = [&](int y) { return (pr.t0 + (float)(y - a.y) * pr.dvdy) / th; };
         const int q[6][2] = {{xa, ya}, {xb, ya}, {xa, yb}, {xa, yb}, {xb, ya}, {xb, yb}};
         for (auto &p : q)
-            out.push_back({p[0] / 16.0f, p[1] / 16.0f, z, c, u(p[0]), v(p[1]), 1.0f});
+            out.push_back({p[0] / 16.0f, p[1] / 16.0f, z, c, u(p[0]), v(p[1]), 1.0f, b.f / 255.0f, (float)std::min(b.z, S.zmax), 0.0f});
     }
     d.count = (uint32_t)out.size() - d.first;
     // one draw for a run in the same state

@@ -99,18 +99,20 @@ Widescreen is a wider field of view, not a stretched picture: the game still ren
 
 For tests: `PORT_ASPECT=16:9` sets the field of view without a window (headless runs ignore `settings.ini`, so the golden session is unchanged); `PORT_OVERLAY_OPEN=1` starts with the menu open and `PORT_WINDOW_SHOT=out.png` saves what the window shows.
 
-## GPU renderer (in development)
+## GPU renderer (experimental)
 
 `gpu.cpp` draws the picture the window shows on the graphics card, through SDL's GPU API, instead of the software GS's high-resolution twins. The software GS still draws everything at 1x into its local memory, which is what the game reads back and textures from; in GPU mode it also records each triangle and sprite aimed at a full-width frame buffer (`GpuRecord`, `gs/gs.cpp`) and hands the list to the presenter at every FINISH, which replays it into a colour and a depth texture per PS2 buffer at the Resolution setting and shows the displayed one. The window's SDL renderer runs on the same GPU device (`SDL_CreateGPURenderer`, SDL 3.4), so the F1 overlay and the aspect handling are unchanged.
 
 Where it stands:
 
 1. ✅ Geometry and the depth test: triangles and sprites in their vertex colours. Metal only (the shaders are MSL), so macOS.
-2. ✅ Textures and the alpha test. The software GS's decoded copies go to the GPU once each (a texture it reads from memory instead, too large for a copy or drawn over, is decoded per frame); the fragment shader reads texels by coordinate with the GS's wrap modes, bilinear filter and texture functions, S and T divided by Q per pixel. A pixel that fails the alpha test is dropped whatever AFAIL says.
-3. Blending and fog. Until then everything is opaque: HUD panels, spray, shadows and menu backdrops are solid blocks.
+2. ✅ Textures and the alpha test. The software GS's decoded copies go to the GPU once each (a texture it reads from memory instead, too large for a copy or drawn over, is decoded per frame); the fragment shader reads texels by coordinate with the GS's wrap modes, bilinear filter and texture functions, S and T divided by Q per pixel. What AFAIL keeps of a pixel that fails the alpha test (colour only, depth only, RGB only) is drawn in a second pass over the same triangles that takes only those pixels.
+3. ✅ Blending, fog and exact depth. The GS's blend, (A - B) * C + D, runs on the GPU's blender: `BlendFor` (`gpu.cpp`) picks an operation and two factors for each form, and the shader multiplies the colour by C first where a factor can't (so source alpha and FIX above 0x80 work). Alpha is kept in the target with 0x80 as 1.0, which is what destination-alpha blends want. FBMSK becomes the colour write mask, fog is the vertex coefficient between the colour and FOGCOL. Depth is the buffer's word over 2^32 whatever its format (the game uses one buffer as Z24 and Z32); for flat primitives and those at the top of a 24-bit buffer the shader computes it as the GS does, the first vertex's Z plus the floor of the interpolated difference, because the game layers its HUD one step of Z apart and wipes its gauges with a quad whose Z crosses a layer's. Left out: PABE and the destination alpha test (the game uses neither; a log line says so if it ever does), COLCLAMP's wrap-around, lines and points, C above 1.0 where it is a destination factor, and the three blend forms whose destination factor would be 1 + C.
 4. Other backends (SPIR-V and DXIL shaders), resolutions above 3x, anti-aliasing.
 
-Until stage 3 the picture is not playable: the setting is for development. `PORT_RENDERER=gpu` (or `software`) overrides it for a run.
+`PORT_RENDERER=gpu` (or `software`) overrides the setting for a run. For comparing the two: with the GPU renderer in a window, every `PORT_SCREENSHOT` frame (the software GS's picture) gets what the window shows at that moment beside it, as `<name>_gpu.png`; `PORT_GPU_LOG=1` logs each kind of state the game draws with, once.
+
+One known difference is the software GS's: it cuts a triangle's interpolated Z off after summing three products in floating point, so a flat triangle's Z comes out one low at scattered pixels, and the speedometer's unlit arcs show through their mask as dots. The GPU renderer hides them.
 
 ## Controls
 
@@ -124,7 +126,7 @@ Keyboard: arrows (D-pad), WASD (left stick), IJKL (right stick), X or Space (Cro
 main.cpp, runtime.cpp   start-up, the game's thread, the port heap
 os.cpp                  the host OS: futexes, low memory, threads, paths
 settings.cpp, overlay.cpp  the port's display settings and their F1 menu
-gpu.cpp                 the GPU renderer (in development)
+gpu.cpp                 the GPU renderer (experimental, macOS)
 lowheap.cpp, nodebug.cpp  macOS and Windows: the game's heap; stand-ins
                         for the Linux-only watchdog and profiler
 ee/                     the EE inline-asm / VU0 macro interpreter

@@ -6,6 +6,7 @@
 #include "port.h"
 
 #include <SDL3/SDL.h>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -57,8 +58,14 @@ struct FragUniforms {
     int32_t wrap[4];     // wms, wmt, bilinear, textured
     int32_t region[4];   // minu, maxu, minv, maxv
     int32_t tfx[4];      // texture function, TCC, alpha test on, ATST
-    int32_t alpha[4];    // AREF, AFAIL
+    int32_t alpha[4];    // AREF, which pixels are kept (0 those that pass, 1 those that fail)
+    int32_t blend[4];    // what the colour is multiplied by (Premul), C is FIX, FBA, fog
+    float fog[4];        // the fog colour, and FIX (1.0 is 0x80)
 };
+
+// What the shader does to the colour so the blender's factors can do the
+// rest: nothing, times C, times 1 - C, times 1 + C, C itself, 1.
+enum Premul { kPmNone, kPmCoef, kPmInvCoef, kPmOnePlusCoef, kPmIsCoef, kPmIsOne };
 
 const char kShaderMSL[] = R"(
 #include <metal_stdlib>
@@ -66,12 +73,19 @@ using namespace metal;
 struct VIn {
     float3 pos [[attribute(0)]];
     float4 col [[attribute(1)]];
-    float3 stq [[attribute(2)]];
+    float4 stq [[attribute(2)]];
+    float2 zz [[attribute(3)]];
 };
 struct VOut {
     float4 pos [[position]];
     float4 col;
-    float3 stq;
+    float4 stq;
+    float zbase [[flat]];
+    float dz;
+};
+struct FOutZ {
+    float4 col [[color(0)]];
+    float depth [[depth(any)]];
 };
 struct FU {
     float2 texSize;
@@ -81,6 +95,8 @@ struct FU {
     int4 region;
     int4 tfx;
     int4 alpha;
+    int4 blend;
+    float4 fog;
 };
 vertex VOut vmain(VIn in [[stage_in]])
 {
@@ -90,6 +106,8 @@ vertex VOut vmain(VIn in [[stage_in]])
     o.pos = float4(in.pos, 1.0);
     o.col = in.col;
     o.stq = in.stq;
+    o.zbase = in.zz.x;
+    o.dz = in.zz.y;
     return o;
 }
 // The GS's wrap modes: repeat, clamp, clamp to a region, repeat a region.
@@ -111,8 +129,7 @@ static float4 texel(texture2d<float> tex, constant FU &u, int2 p)
     y = clamp(y, 0, int(u.copySize.y) - 1);
     return tex.read(uint2(uint(x), uint(y)));
 }
-fragment float4 fmain(VOut in [[stage_in]], constant FU &u [[buffer(0)]], texture2d<float> tex [[texture(0)]],
-                      sampler smp [[sampler(0)]])
+static float4 shade(VOut in, constant FU &u, texture2d<float> tex)
 {
     float4 c = in.col;
     if (u.wrap.w != 0) {
@@ -147,23 +164,140 @@ fragment float4 fmain(VOut in [[stage_in]], constant FU &u [[buffer(0)]], textur
             c = float4(mod + c.a, tcc ? t.a : c.a);
         c = min(c, float4(1.0));
     }
-    // the alpha test. A failed pixel is dropped whatever AFAIL says (the
-    // modes that keep part of it need blending's passes: to come)
+    // fog: the vertex's coefficient between the colour and FOGCOL
+    if (u.blend.w != 0)
+        c.rgb = mix(u.fog.rgb, c.rgb, in.stq.w);
+    // the alpha test. What AFAIL keeps of a failed pixel is drawn in a
+    // second pass that takes only those
     if (u.tfx.z != 0) {
         int a = int(c.a * 255.0 + 0.5), ref = u.alpha.x, op = u.tfx.w;
         bool pass = op == 2 ? a < ref : op == 3 ? a <= ref : op == 4 ? a == ref : op == 5 ? a >= ref : op == 6 ? a > ref : a != ref;
-        if (!pass && u.alpha.y == 0)
+        if (pass != (u.alpha.y == 0))
             discard_fragment();
     }
+    // blending: the part of the GS's equation the blender's factors can't
+    // do. Alpha goes out with 0x80 as 1.0, which is what the factors want
+    float a = c.a * (255.0 / 128.0);
+    float coef = u.blend.y != 0 ? u.fog.w : a;
+    if (u.blend.x == 1)
+        c.rgb *= coef;
+    else if (u.blend.x == 2)
+        c.rgb *= max(1.0 - coef, 0.0);
+    else if (u.blend.x == 3)
+        c.rgb *= 1.0 + coef;
+    else if (u.blend.x == 4)
+        c.rgb = float3(coef);
+    else if (u.blend.x == 5)
+        c.rgb = float3(1.0);
+    c.a = u.blend.z != 0 ? 1.0 : min(a, 1.0);
     return c;
+}
+fragment float4 fmain(VOut in [[stage_in]], constant FU &u [[buffer(0)]], texture2d<float> tex [[texture(0)]],
+                      sampler smp [[sampler(0)]])
+{
+    return shade(in, u, tex);
+}
+// Depth as the GS computes it: the buffer's integer, cut off from what is
+// interpolated (a float depth rounds to the nearest, and at the top of 24
+// bits has no fraction to tell; the game's HUD is layers one step apart)
+fragment FOutZ fmainz(VOut in [[stage_in]], constant FU &u [[buffer(0)]], texture2d<float> tex [[texture(0)]],
+                      sampler smp [[sampler(0)]])
+{
+    FOutZ o;
+    o.col = shade(in, u, tex);
+    o.depth = (in.zbase + floor(in.dz)) * (1.0 / 4294967296.0);
+    return o;
 }
 )";
 
 struct ClipVertex {
     float x, y, z;
     uint32_t rgba;
-    float s, t, q;
+    float s, t, q, f;
+    float zbase, dz;
 };
+
+// What a pipeline is made for.
+struct PipeState {
+    uint8_t ztest, zwrite, cmask;
+    bool exactz;
+    bool blend;
+    SDL_GPUBlendOp op;
+    SDL_GPUBlendFactor src, dst;
+};
+
+// The GS's blend, (A - B) * C + D, as the blender does it: an operation
+// and two factors, with the shader multiplying the colour first (Premul)
+// where a factor can't. C is taken as at most 1.0 where it is a factor.
+// The few forms with a destination factor of 1 + C are drawn without the C.
+void BlendFor(const GpuDraw &d, PipeState &ps, int &premul)
+{
+    premul = kPmNone;
+    ps.blend = false;
+    ps.op = SDL_GPU_BLENDOP_ADD;
+    ps.src = SDL_GPU_BLENDFACTOR_ONE;
+    ps.dst = SDL_GPU_BLENDFACTOR_ZERO;
+    if (!d.abe)
+        return;
+    ps.blend = true;
+    enum { Z, O, C, IC, P1, DC };   // zero, one, C, 1 - C, one with the colour times 1 + C, destination colour
+    enum { ADD, SUB, RSUB };
+    struct Form {
+        uint8_t op, src, dst;
+    };
+    static const Form only[3] = {{ADD, O, Z}, {ADD, Z, O}, {ADD, Z, Z}};   // A == B: D alone
+    static const Form forms[3][3][3] = {
+        // A source
+        {{},
+         {{SUB, P1, C}, {ADD, C, IC}, {SUB, C, C}},     // B destination
+         {{ADD, P1, Z}, {ADD, C, O}, {ADD, C, Z}}},     // B zero
+        // A destination
+        {{{ADD, IC, C}, {RSUB, C, O}, {RSUB, C, C}},    // B source
+         {},
+         {{ADD, O, C}, {ADD, DC, O}, {ADD, Z, C}}},     // B zero
+        // A zero
+        {{{ADD, IC, Z}, {RSUB, C, O}, {ADD, Z, Z}},     // B source
+         {{SUB, O, C}, {ADD, Z, IC}, {ADD, Z, Z}},      // B destination
+         {}},
+    };
+    const Form f = d.ba == d.bb ? only[d.bd] : forms[d.ba][d.bb][d.bd];
+    ps.op = f.op == ADD ? SDL_GPU_BLENDOP_ADD : f.op == SUB ? SDL_GPU_BLENDOP_SUBTRACT : SDL_GPU_BLENDOP_REVERSE_SUBTRACT;
+    const bool dstAlpha = d.bc == 1;
+    switch (f.src) {
+    case Z: ps.src = SDL_GPU_BLENDFACTOR_ZERO; break;
+    case O: ps.src = SDL_GPU_BLENDFACTOR_ONE; break;
+    case C:
+        ps.src = dstAlpha ? SDL_GPU_BLENDFACTOR_DST_ALPHA : SDL_GPU_BLENDFACTOR_ONE;
+        premul = dstAlpha ? kPmNone : kPmCoef;
+        break;
+    case IC:
+        ps.src = dstAlpha ? SDL_GPU_BLENDFACTOR_ONE_MINUS_DST_ALPHA : SDL_GPU_BLENDFACTOR_ONE;
+        premul = dstAlpha ? kPmNone : kPmInvCoef;
+        break;
+    case P1:
+        ps.src = SDL_GPU_BLENDFACTOR_ONE;
+        premul = dstAlpha ? kPmNone : kPmOnePlusCoef;
+        break;
+    case DC:
+        ps.src = SDL_GPU_BLENDFACTOR_DST_COLOR;
+        premul = dstAlpha ? kPmIsOne : kPmIsCoef;
+        break;
+    }
+    switch (f.dst) {
+    case Z: ps.dst = SDL_GPU_BLENDFACTOR_ZERO; break;
+    case O: ps.dst = SDL_GPU_BLENDFACTOR_ONE; break;
+    case C:
+        ps.dst = d.bc == 0   ? SDL_GPU_BLENDFACTOR_SRC_ALPHA
+                 : d.bc == 1 ? SDL_GPU_BLENDFACTOR_DST_ALPHA
+                             : SDL_GPU_BLENDFACTOR_CONSTANT_COLOR;
+        break;
+    case IC:
+        ps.dst = d.bc == 0   ? SDL_GPU_BLENDFACTOR_ONE_MINUS_SRC_ALPHA
+                 : d.bc == 1 ? SDL_GPU_BLENDFACTOR_ONE_MINUS_DST_ALPHA
+                             : SDL_GPU_BLENDFACTOR_ONE_MINUS_CONSTANT_COLOR;
+        break;
+    }
+}
 
 struct Target {
     SDL_GPUTexture *gpu = nullptr;
@@ -172,7 +306,7 @@ struct Target {
 
 struct {
     SDL_GPUDevice *device;
-    SDL_GPUShader *vs, *fs;
+    SDL_GPUShader *vs, *fs, *fsz;   // fsz: computes the depth itself (exactz)
     int scale = 1;
     std::map<uint32_t, SDL_GPUGraphicsPipeline *> pipelines;   // by depth test, depth write, colour write, has depth
     std::map<uint32_t, Target> color, depth;                   // by PS2 block address
@@ -203,9 +337,10 @@ struct {
     uint64_t dropped;
 } G;
 
-SDL_GPUGraphicsPipeline *Pipeline(const GpuDraw &d)
+SDL_GPUGraphicsPipeline *Pipeline(const PipeState &d)
 {
-    uint32_t key = d.ztest | d.zwrite << 4 | d.cwrite << 5;
+    uint32_t key = d.ztest | d.zwrite << 2 | d.cmask << 3 | d.blend << 7 | (uint32_t)d.op << 8 | (uint32_t)d.src << 12 |
+                   (uint32_t)d.dst << 16 | (uint32_t)d.exactz << 20;
     auto it = G.pipelines.find(key);
     if (it != G.pipelines.end())
         return it->second;
@@ -213,7 +348,10 @@ SDL_GPUGraphicsPipeline *Pipeline(const GpuDraw &d)
     vb.slot = 0;
     vb.pitch = sizeof(ClipVertex);
     vb.input_rate = SDL_GPU_VERTEXINPUTRATE_VERTEX;
-    SDL_GPUVertexAttribute attrs[3] = {};
+    SDL_GPUVertexAttribute attrs[4] = {};
+    attrs[3].location = 3;
+    attrs[3].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT2;
+    attrs[3].offset = 32;
     attrs[0].location = 0;
     attrs[0].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
     attrs[0].offset = 0;
@@ -221,20 +359,29 @@ SDL_GPUGraphicsPipeline *Pipeline(const GpuDraw &d)
     attrs[1].format = SDL_GPU_VERTEXELEMENTFORMAT_UBYTE4_NORM;
     attrs[1].offset = 12;
     attrs[2].location = 2;
-    attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT3;
+    attrs[2].format = SDL_GPU_VERTEXELEMENTFORMAT_FLOAT4;
     attrs[2].offset = 16;
     SDL_GPUColorTargetDescription ct = {};
     ct.format = SDL_GPU_TEXTUREFORMAT_R8G8B8A8_UNORM;
     ct.blend_state.enable_color_write_mask = true;
-    ct.blend_state.color_write_mask =
-        d.cwrite ? SDL_GPU_COLORCOMPONENT_R | SDL_GPU_COLORCOMPONENT_G | SDL_GPU_COLORCOMPONENT_B | SDL_GPU_COLORCOMPONENT_A : 0;
+    ct.blend_state.color_write_mask = d.cmask;   // (the same bits: R, G, B, A)
+    if (d.blend) {
+        // alpha isn't blended: the source's is written
+        ct.blend_state.enable_blend = true;
+        ct.blend_state.color_blend_op = d.op;
+        ct.blend_state.src_color_blendfactor = d.src;
+        ct.blend_state.dst_color_blendfactor = d.dst;
+        ct.blend_state.alpha_blend_op = SDL_GPU_BLENDOP_ADD;
+        ct.blend_state.src_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ONE;
+        ct.blend_state.dst_alpha_blendfactor = SDL_GPU_BLENDFACTOR_ZERO;
+    }
     SDL_GPUGraphicsPipelineCreateInfo info = {};
     info.vertex_shader = G.vs;
-    info.fragment_shader = G.fs;
+    info.fragment_shader = d.exactz ? G.fsz : G.fs;
     info.vertex_input_state.vertex_buffer_descriptions = &vb;
     info.vertex_input_state.num_vertex_buffers = 1;
     info.vertex_input_state.vertex_attributes = attrs;
-    info.vertex_input_state.num_vertex_attributes = 3;
+    info.vertex_input_state.num_vertex_attributes = 4;
     info.primitive_type = SDL_GPU_PRIMITIVETYPE_TRIANGLELIST;
     info.rasterizer_state.fill_mode = SDL_GPU_FILLMODE_FILL;
     info.rasterizer_state.cull_mode = SDL_GPU_CULLMODE_NONE;
@@ -332,7 +479,7 @@ void Upload(SDL_GPUCommandBuffer *cmd, const GpuFrame &f)
     ClipVertex *out = (ClipVertex *)SDL_MapGPUTransferBuffer(G.device, G.xfer, true);
     for (uint32_t i = 0; i < n; i++) {
         const GpuVertex &v = f.verts[i];
-        out[i] = {v.x * (2.0f / kW) - 1.0f, 1.0f - v.y * (2.0f / kH), v.z, v.rgba, v.s, v.t, v.q};
+        out[i] = {v.x * (2.0f / kW) - 1.0f, 1.0f - v.y * (2.0f / kH), v.z, v.rgba, v.s, v.t, v.q, v.f, v.zbase, v.dz};
     }
     SDL_UnmapGPUTransferBuffer(G.device, G.xfer);
     SDL_GPUCopyPass *copy = SDL_BeginGPUCopyPass(cmd);
@@ -504,20 +651,58 @@ void Replay(SDL_Renderer *renderer, const GpuFrame &f)
         u.tfx[2] = d.ate;
         u.tfx[3] = d.atst;
         u.alpha[0] = d.aref;
-        u.alpha[1] = d.afail;
-        if (!haveU || memcmp(&u, &boundU, sizeof u)) {
-            SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
-            boundU = u;
-            haveU = true;
-        }
-        SDL_GPUGraphicsPipeline *p = Pipeline(d);
-        if (p != bound) {
-            SDL_BindGPUGraphicsPipeline(pass, p);
-            bound = p;
+        PipeState ps = {};
+        ps.ztest = d.ztest;
+        ps.zwrite = d.zwrite;
+        ps.exactz = d.exactz && d.ztest;
+        ps.cmask = d.cwrite ? d.cmask : 0;
+        int premul;
+        BlendFor(d, ps, premul);
+        u.blend[0] = premul;
+        u.blend[1] = d.bc == 2;
+        // (FBA with source alpha as a factor: the factor matters more)
+        u.blend[2] = d.fba && !(ps.blend && d.bc == 0);
+        u.blend[3] = d.fge;
+        u.fog[0] = d.fogr / 255.0f;
+        u.fog[1] = d.fogg / 255.0f;
+        u.fog[2] = d.fogb / 255.0f;
+        u.fog[3] = d.fix / 128.0f;
+        if (ps.blend && d.bc == 2) {
+            float c = std::min(d.fix / 128.0f, 1.0f);
+            SDL_SetGPUBlendConstants(pass, SDL_FColor{c, c, c, c});
         }
         SDL_Rect sc = {d.sx0 * N, d.sy0 * N, (d.sx1 - d.sx0 + 1) * N, (d.sy1 - d.sy0 + 1) * N};
         SDL_SetGPUScissor(pass, &sc);
-        SDL_DrawGPUPrimitives(pass, d.count, 1, d.first, 0);
+        // the pixels that pass the alpha test; then, where AFAIL keeps
+        // part of those that fail, them with only that part written
+        for (int failed = 0; failed < 2; failed++) {
+            if (failed) {
+                if (!d.ate || d.afail == 0)
+                    break;
+                if (d.afail == 1) {
+                    ps.zwrite = 0;
+                } else if (d.afail == 2) {
+                    ps.cmask = 0;
+                } else {
+                    ps.zwrite = 0;
+                    ps.cmask &= 7;
+                }
+                if (!ps.cmask && !ps.zwrite)
+                    break;
+            }
+            u.alpha[1] = failed;
+            if (!haveU || memcmp(&u, &boundU, sizeof u)) {
+                SDL_PushGPUFragmentUniformData(cmd, 0, &u, sizeof u);
+                boundU = u;
+                haveU = true;
+            }
+            SDL_GPUGraphicsPipeline *p = Pipeline(ps);
+            if (p != bound) {
+                SDL_BindGPUGraphicsPipeline(pass, p);
+                bound = p;
+            }
+            SDL_DrawGPUPrimitives(pass, d.count, 1, d.first, 0);
+        }
     }
     if (pass)
         SDL_EndGPURenderPass(pass);
@@ -577,9 +762,11 @@ SDL_Renderer *port_gpu_start(SDL_Window *window, int scale)
     si.num_samplers = 1;
     si.num_uniform_buffers = 1;
     G.fs = SDL_CreateGPUShader(G.device, &si);
-    if (!G.vs || !G.fs)
+    si.entrypoint = "fmainz";
+    G.fsz = SDL_CreateGPUShader(G.device, &si);
+    if (!G.vs || !G.fs || !G.fsz)
         port_log("GPU: the shaders didn't compile (%s)", SDL_GetError());
-    SDL_Renderer *renderer = G.vs && G.fs ? SDL_CreateGPURenderer(G.device, window) : nullptr;
+    SDL_Renderer *renderer = G.vs && G.fs && G.fsz ? SDL_CreateGPURenderer(G.device, window) : nullptr;
     if (!renderer) {
         port_log("GPU: can't start (vertex shader %p, fragment shader %p, renderer: %s): the software picture", (void *)G.vs,
                  (void *)G.fs, SDL_GetError());
