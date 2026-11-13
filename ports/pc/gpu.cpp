@@ -1,7 +1,11 @@
 // The GPU renderer: see gpu.h. SDL's GPU API (Metal, Vulkan, Direct3D 12
-// behind one interface); the shaders here are Metal's, so for now it runs
-// on macOS only and port_gpu_start fails elsewhere.
+// behind one interface). The shaders exist twice: Metal's below, for macOS,
+// and Vulkan's in ports/pc/shaders (compiled into gpu_spirv.h), for Windows
+// and Linux. There are none for Direct3D 12, so Windows needs a Vulkan
+// driver. PORT_GPU_DRIVER names the one to use ("vulkan" on macOS runs the
+// Vulkan shaders through MoltenVK, to test them).
 #include "gpu.h"
+#include "gpu_spirv.h"
 
 #include "port.h"
 
@@ -10,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
+#include <cstdlib>
 #include <cstring>
 #include <deque>
 #include <map>
@@ -745,25 +750,38 @@ void port_gpu_submit(GpuFrame &&frame)
 
 SDL_Renderer *port_gpu_start(SDL_Window *window, int scale)
 {
-    G.device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL, false, nullptr);
+    const char *driver = getenv("PORT_GPU_DRIVER");
+    if (driver && !*driver)
+        driver = nullptr;
+    G.device = SDL_CreateGPUDevice(SDL_GPU_SHADERFORMAT_MSL | SDL_GPU_SHADERFORMAT_SPIRV, false, driver);
     if (!G.device) {
-        port_log("GPU: no device that takes Metal shaders (%s): the software picture", SDL_GetError());
+        port_log("GPU: no Metal or Vulkan device (%s): the software picture", SDL_GetError());
         return nullptr;
     }
     SDL_GPUShaderCreateInfo si = {};
-    si.code = (const Uint8 *)kShaderMSL;
-    si.code_size = sizeof kShaderMSL - 1;   // the text, without its terminating zero
-    si.format = SDL_GPU_SHADERFORMAT_MSL;
-    si.entrypoint = "vmain";
-    si.stage = SDL_GPU_SHADERSTAGE_VERTEX;
-    G.vs = SDL_CreateGPUShader(G.device, &si);
-    si.entrypoint = "fmain";
-    si.stage = SDL_GPU_SHADERSTAGE_FRAGMENT;
+    const bool msl = (SDL_GetGPUShaderFormats(G.device) & SDL_GPU_SHADERFORMAT_MSL) != 0;
+    // one shader's code: Metal's text (all three are in it, by entry point),
+    // or its Vulkan binary
+    auto shader = [&](const char *mslEntry, const uint32_t *spirv, size_t spirvSize, SDL_GPUShaderStage stage) {
+        if (msl) {
+            si.code = (const Uint8 *)kShaderMSL;
+            si.code_size = sizeof kShaderMSL - 1;   // the text, without its terminating zero
+            si.format = SDL_GPU_SHADERFORMAT_MSL;
+            si.entrypoint = mslEntry;
+        } else {
+            si.code = (const Uint8 *)spirv;
+            si.code_size = spirvSize;
+            si.format = SDL_GPU_SHADERFORMAT_SPIRV;
+            si.entrypoint = "main";
+        }
+        si.stage = stage;
+        return SDL_CreateGPUShader(G.device, &si);
+    };
+    G.vs = shader("vmain", kSpirvVert, sizeof kSpirvVert, SDL_GPU_SHADERSTAGE_VERTEX);
     si.num_samplers = 1;
     si.num_uniform_buffers = 1;
-    G.fs = SDL_CreateGPUShader(G.device, &si);
-    si.entrypoint = "fmainz";
-    G.fsz = SDL_CreateGPUShader(G.device, &si);
+    G.fs = shader("fmain", kSpirvFrag, sizeof kSpirvFrag, SDL_GPU_SHADERSTAGE_FRAGMENT);
+    G.fsz = shader("fmainz", kSpirvFragZ, sizeof kSpirvFragZ, SDL_GPU_SHADERSTAGE_FRAGMENT);
     if (!G.vs || !G.fs || !G.fsz)
         port_log("GPU: the shaders didn't compile (%s)", SDL_GetError());
     SDL_Renderer *renderer = G.vs && G.fs && G.fsz ? SDL_CreateGPURenderer(G.device, window) : nullptr;
