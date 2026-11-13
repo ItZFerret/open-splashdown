@@ -18,6 +18,7 @@
 #include "gs_tables.h"
 
 #include <algorithm>
+#include <cstddef>
 #include <climits>
 #include <array>
 #include <atomic>
@@ -1680,6 +1681,7 @@ struct TexEntry {
     Range r;            // the blocks it was decoded from
     uint64_t lastUse;   // the primitives before it may read it
     bool live;          // findable (not overwritten in memory since)
+    uint64_t serial;    // its name for the GPU renderer (GpuRecord)
     uint16_t clut[512]; // indexed: the CLUT it was decoded with
 };
 // in ring order; made by the parser's thread, whose allocations stay out
@@ -1867,6 +1869,8 @@ TexEntry *TexLookup(DrawState &S, const Range &read)
     e.r = read;
     e.lastUse = 0;
     e.live = true;
+    static uint64_t serial;
+    e.serial = ++serial << 1;   // (odd serials: GpuRecord's own copies)
     if (indexed)
         memcpy(e.clut, S.clut, sizeof e.clut);
     for (uint32_t p = read.a / 32; p < (read.b + 31) / 32; p++)
@@ -2375,13 +2379,54 @@ void SubmitHi(const Prim &pr, bool direct)
 // them: a GS pixel is taken as the square from its coordinate to the next,
 // so a sprite covers the same squares at any resolution.
 GpuFrame g_gpuFrame;
+// The decoded copies the GPU has (serial -> the frame last drawn with), and
+// the state whose texture GpuRecord decoded itself (one the software path
+// reads from memory: too large for a copy, or drawn over).
+std::unordered_map<uint64_t, uint64_t> g_gpuTextures;
+uint32_t g_gpuOwnFor = ~0u;
+uint64_t g_gpuOwnSerial, g_gpuOwnNext = 1;
+
+// The texture state S samples, sent to the GPU if it hasn't got it: its
+// serial, and where its first texel is. 0 if it can't be had.
+uint64_t GpuTextureFor(uint32_t id, const DrawState &S, uint16_t &ox, uint16_t &oy)
+{
+    if (S.tex && g_curTex) {
+        const TexEntry &e = *g_curTex;
+        ox = (uint16_t)e.key.ox;
+        oy = (uint16_t)e.key.oy;
+        auto [it, fresh] = g_gpuTextures.try_emplace(e.serial, g_frameSeq);
+        it->second = g_frameSeq;
+        if (fresh) {
+            GpuTexture t = {e.serial, (uint16_t)e.key.w, (uint16_t)e.key.h, false, {}};
+            t.rgba.assign(g_texRing + e.off, g_texRing + e.off + e.n);
+            g_gpuFrame.textures.push_back(std::move(t));
+        }
+        return e.serial;
+    }
+    // no copy: decode the whole texture from memory, once per state (what
+    // it would read has been waited for: SubmitNative), for this frame
+    ox = oy = 0;
+    if (g_gpuOwnFor == id)
+        return g_gpuOwnSerial;
+    if (S.tw <= 0 || S.th <= 0 || S.tw > 1024 || S.th > 1024)
+        return 0;
+    GpuTexture t = {g_gpuOwnNext, (uint16_t)S.tw, (uint16_t)S.th, true, {}};
+    g_gpuOwnNext += 2;
+    t.rgba.resize((size_t)S.tw * S.th);
+    Decode(S, 0, 0, S.tw, S.th, t.rgba.data());
+    g_gpuOwnFor = id;
+    g_gpuOwnSerial = t.serial;
+    g_gpuFrame.textures.push_back(std::move(t));
+    return g_gpuOwnSerial;
+}
 
 void GpuRecord(const Prim &pr)
 {
     const DrawState &S = g_states[pr.state];
     if (S.fbw != 10 || S.fpsm != CT32 || (pr.kind != P_TRI && pr.kind != P_SPRITE))
         return;
-    GpuDraw d = {};
+    GpuDraw d;
+    memset(&d, 0, sizeof d);
     d.fbp = S.fbp;
     d.zbp = S.zbp;
     d.cwrite = 1;
@@ -2394,6 +2439,11 @@ void GpuRecord(const Prim &pr)
             d.cwrite = 0;
         else
             d.zwrite = 0;
+    } else if (S.ate && S.atst != 1) {
+        d.ate = 1;
+        d.atst = S.atst;
+        d.afail = S.afail;
+        d.aref = (uint8_t)S.aref;
     }
     if (!S.zte) {
         d.ztest = 0;
@@ -2412,6 +2462,22 @@ void GpuRecord(const Prim &pr)
     d.sy1 = (uint16_t)std::min(sc.y1, 511);
     if (d.sx0 > d.sx1 || d.sy0 > d.sy1)
         return;
+    if (S.at.tme && d.cwrite) {
+        d.tex = GpuTextureFor(pr.state, S, d.ox, d.oy);
+        if (d.tex) {
+            d.tw = (uint16_t)S.tw;
+            d.th = (uint16_t)S.th;
+            d.linear = S.linear;
+            d.tfx = (uint8_t)S.tfx;
+            d.tcc = S.tcc;
+            d.wms = (uint8_t)S.wms;
+            d.wmt = (uint8_t)S.wmt;
+            d.minu = (uint16_t)S.minu;
+            d.maxu = (uint16_t)S.maxu;
+            d.minv = (uint16_t)S.minv;
+            d.maxv = (uint16_t)S.maxv;
+        }
+    }
     std::vector<GpuVertex> &out = g_gpuFrame.verts;
     d.first = (uint32_t)out.size();
     const double zscale = 1.0 / (double)S.zmax;
@@ -2419,29 +2485,33 @@ void GpuRecord(const Prim &pr)
     auto colour = [](int r, int g, int b, int a) {
         return (uint32_t)r | (uint32_t)g << 8 | (uint32_t)b << 16 | (uint32_t)a << 24;
     };
+    const float tw = d.tex ? (float)S.tw : 1.0f, th = d.tex ? (float)S.th : 1.0f;
     if (pr.kind == P_TRI) {
         for (int i = 0; i < 3; i++) {
             const Vertex &v = pr.v[i];
             uint32_t c = S.at.iip ? colour(v.r, v.g, v.b, v.a) : colour(pr.lr, pr.lg, pr.lb, pr.la);
-            out.push_back({v.x / 16.0f, v.y / 16.0f, depth(v.z), c});
+            // SetupTriangle's tu, tv, tq: texels (and 1) with UV coordinates,
+            // else S, T and Q
+            float ts = S.at.fst ? pr.tu[i] / tw : pr.tu[i], tt = S.at.fst ? pr.tv[i] / th : pr.tv[i];
+            out.push_back({v.x / 16.0f, v.y / 16.0f, depth(v.z), c, ts, tt, pr.tq[i]});
         }
     } else {
         const Vertex &a = pr.v[0], &b = pr.v[1];
-        float x0 = std::min(a.x, b.x) / 16.0f, x1 = std::max(a.x, b.x) / 16.0f;
-        float y0 = std::min(a.y, b.y) / 16.0f, y1 = std::max(a.y, b.y) / 16.0f;
+        int xa = std::min(a.x, b.x), xb = std::max(a.x, b.x), ya = std::min(a.y, b.y), yb = std::max(a.y, b.y);
         float z = depth(b.z);
         uint32_t c = colour(b.r, b.g, b.b, b.a);
-        const float q[6][2] = {{x0, y0}, {x1, y0}, {x0, y1}, {x0, y1}, {x1, y0}, {x1, y1}};
+        // SetupSprite's texel coordinates: linear in x and y from the first vertex
+        auto u = [&](int x) { return (pr.u0 + (float)(x - a.x) * pr.dudx) / tw; };
+        auto v = [&](int y) { return (pr.t0 + (float)(y - a.y) * pr.dvdy) / th; };
+        const int q[6][2] = {{xa, ya}, {xb, ya}, {xa, yb}, {xa, yb}, {xb, ya}, {xb, yb}};
         for (auto &p : q)
-            out.push_back({p[0], p[1], z, c});
+            out.push_back({p[0] / 16.0f, p[1] / 16.0f, z, c, u(p[0]), v(p[1]), 1.0f});
     }
     d.count = (uint32_t)out.size() - d.first;
     // one draw for a run in the same state
     if (!g_gpuFrame.draws.empty()) {
         GpuDraw &last = g_gpuFrame.draws.back();
-        if (last.fbp == d.fbp && last.zbp == d.zbp && last.ztest == d.ztest && last.zwrite == d.zwrite &&
-            last.cwrite == d.cwrite && last.sx0 == d.sx0 && last.sx1 == d.sx1 && last.sy0 == d.sy0 && last.sy1 == d.sy1 &&
-            last.first + last.count == d.first) {
+        if (!memcmp(&last, &d, offsetof(GpuDraw, first)) && last.first + last.count == d.first) {
             last.count += d.count;
             return;
         }
@@ -2453,6 +2523,16 @@ void GpuRecord(const Prim &pr)
 // the buffer on display if a picture is complete.
 void GpuFinish(bool present)
 {
+    // copies not drawn with for a while: the GPU needn't keep them
+    if (g_gpuTextures.size() > 1500)
+        for (auto it = g_gpuTextures.begin(); it != g_gpuTextures.end();) {
+            if (g_frameSeq - it->second > 600) {
+                g_gpuFrame.released.push_back(it->first);
+                it = g_gpuTextures.erase(it);
+            } else
+                ++it;
+        }
+    g_gpuOwnFor = ~0u;   // its own copies last a frame
     GpuFrame f = std::move(g_gpuFrame);
     g_gpuFrame = GpuFrame();
     if (present) {
@@ -2468,7 +2548,7 @@ void GpuFinish(bool present)
         f.dw = (int)((Bits(display, 32, 12) + magh) / magh);
         f.dh = (int)Bits(display, 44, 11) + 1;
     }
-    if (f.present || !f.draws.empty())
+    if (f.present || !f.draws.empty() || !f.textures.empty() || !f.released.empty())
         port_gpu_submit(std::move(f));
 }
 

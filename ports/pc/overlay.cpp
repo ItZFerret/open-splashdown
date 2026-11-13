@@ -43,7 +43,7 @@ struct Row {
 const Row kRowInfo[kRows] = {
     {"Aspect ratio", "Wider shapes show more to the sides. The HUD and menus stretch."},
     {"Resolution", "Draws with more pixels: sharper. 3x can drop below 30 FPS in races."},
-    {"Renderer", "GPU is in development: flat colours only so far. Applies at next start."},
+    {"Renderer", "GPU is in development: no transparency yet. Applies at next start."},
     {"Display", "Fullscreen is borderless, at the desktop's resolution."},
     {"Window size", "The picture's height, in steps of the game's 448 lines."},
     {"Scaling", "Smooth blends pixels. Sharp keeps them. Integer uses whole multiples."},

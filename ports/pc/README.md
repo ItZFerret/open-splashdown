@@ -105,9 +105,9 @@ For tests: `PORT_ASPECT=16:9` sets the field of view without a window (headless 
 
 Where it stands:
 
-1. ✅ Geometry and the depth test: untextured, unblended triangles and sprites in their vertex colours. Metal only (the shaders are MSL), so macOS.
-2. Textures.
-3. Blending, alpha test, fog.
+1. ✅ Geometry and the depth test: triangles and sprites in their vertex colours. Metal only (the shaders are MSL), so macOS.
+2. ✅ Textures and the alpha test. The software GS's decoded copies go to the GPU once each (a texture it reads from memory instead, too large for a copy or drawn over, is decoded per frame); the fragment shader reads texels by coordinate with the GS's wrap modes, bilinear filter and texture functions, S and T divided by Q per pixel. A pixel that fails the alpha test is dropped whatever AFAIL says.
+3. Blending and fog. Until then everything is opaque: HUD panels, spray, shadows and menu backdrops are solid blocks.
 4. Other backends (SPIR-V and DXIL shaders), resolutions above 3x, anti-aliasing.
 
 Until stage 3 the picture is not playable: the setting is for development. `PORT_RENDERER=gpu` (or `software`) overrides it for a run.
