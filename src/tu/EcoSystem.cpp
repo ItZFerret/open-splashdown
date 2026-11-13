@@ -808,7 +808,7 @@ struct EcoVegetationItem {
 };
 
 
-#define UNCACHED(p) ((_D3DMATRIX *)(((unsigned int)(p) & 0x0FFFFFFF) | EE_UNCACHED))
+#define UNCACHED(p) ((_D3DMATRIX *)PS2_ADDR(((unsigned int)(p) & 0x0FFFFFFF) | EE_UNCACHED))
 
 // Fills a 3D vegetation render item (from Create3DVegetationTransformRenderItem)
 // with this plant's transform and alpha test, and queues it on its shader.
@@ -2157,11 +2157,11 @@ int EcoSystem::PrepareGeometry()
         if (!list || i >= LpVisibilityQuadTree->m_listCount)
             break;
         unsigned int entry = (unsigned int)list[i++];
-        veg = (Vegetation *)(entry & ~1);
+        veg = (Vegetation *)PS2_ADDR((entry & ~1));
         if (!veg)
             break;
         if (veg->m_typeID != m_typeID) {
-            *out = (SearchableObject *)entry;
+            *out = (SearchableObject *)PS2_ADDR(entry);
             out++;
             count++;
             continue;
@@ -2248,7 +2248,7 @@ int EcoSystem::PrepareGeometry()
                 m_x21D8[1] = bucket;
             continue;
         }
-        Vegetation *cur = (Vegetation *)m_slots[bucket].m_4;
+        Vegetation *cur = (Vegetation *)PS2_ADDR(m_slots[bucket].m_4);
         if (veg->m_depth >= cur->m_depth) {
             index = ((unsigned int)cur - (unsigned int)m_vegetation) / sizeof(Vegetation);
             veg->m_next = index;
@@ -2286,7 +2286,7 @@ int EcoSystem::PrepareGeometry()
         }
         for (i = m_x21D8[1]; i >= m_x21D8[0]; i--) {
             if (m_slots[i].m_0 == m_x5B4 && m_slots[i].m_8 < 1500) {
-                veg = (Vegetation *)m_slots[i].m_4;
+                veg = (Vegetation *)PS2_ADDR(m_slots[i].m_4);
                 while (veg) {
                     if (veg->m_alpha == 64) {
                         AddToBufferOf2DVegetation(veg);

@@ -451,7 +451,7 @@ static inline float Fabs(float x)
 static inline int Max(int a, int b) { return a > b ? a : b; }
 static inline int Min(int a, int b) { return a < b ? a : b; }
 
-#define UNCACHED(p) ((WaterVertex *)((unsigned int)(p) | EE_UNCACHED_ACCEL))
+#define UNCACHED(p) ((WaterVertex *)PS2_ADDR((unsigned int)(p) | EE_UNCACHED_ACCEL))
 
 static inline void FlushRow(int128_t *carry, WaterVertex *prev)
 {
@@ -537,7 +537,7 @@ int Water::Tick(float dt)
         dz = Max(dz, -1);
         dz = Min(dz, 1);
         dz <<= 3;
-        texels = (unsigned int *)((unsigned int)patch->m_texture->LockSys(0, 0, 0) | EE_UNCACHED_ACCEL);
+        texels = (unsigned int *)PS2_ADDR(((unsigned int)patch->m_texture->LockSys(0, 0, 0) | EE_UNCACHED_ACCEL));
         cur = patch->m_current;
         next = (cur + 1) % 2;
         src = patch->m_vertices[cur];

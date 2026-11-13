@@ -12,6 +12,7 @@
 #include "gs.h"
 
 #include "port.h"
+#include "port_ptr32.h"
 #include "gs_tables.h"
 
 #include <algorithm>
@@ -23,7 +24,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <deque>
-#include <immintrin.h>
+#include "port_simd.h"
 #include "port_os.h"
 #include <mutex>
 #include <thread>
@@ -901,8 +902,8 @@ void RasterTriangle(const Prim &pr, const DrawState &S, Rows rows)
 // (Q near 0: the scalar code's integer overflow) is sampled by the scalar
 // code. PORT_GS_NOFAST=1 draws everything with the scalar code.
 
-#define GS_AVX2 __attribute__((target("avx2")))
-#define GS_AVX2_INLINE __attribute__((target("avx2"), always_inline)) inline
+#define GS_AVX2 PORT_TARGET_AVX2
+#define GS_AVX2_INLINE PORT_TARGET_AVX2 __attribute__((always_inline)) inline
 
 bool g_fastOk;  // the CPU has AVX2, no PORT_GS_NOFAST or PORT_PIXEL_DEBUG
 
@@ -984,12 +985,14 @@ GS_AVX2_INLINE bool Sample4(const DrawState &S, __m128 u, __m128 v, __m128i &out
     __m128i gv = _mm_sub_epi32(lim, fv);
     __m128i m8 = _mm_set1_epi32(0xFF), o = _mm_setzero_si128();
     for (int sh = 0; sh < 32; sh += 8) {
-        __m128i a0 = _mm_and_si128(_mm_srli_epi32(t00, sh), m8), a1 = _mm_and_si128(_mm_srli_epi32(t10, sh), m8);
-        __m128i b0 = _mm_and_si128(_mm_srli_epi32(t01, sh), m8), b1 = _mm_and_si128(_mm_srli_epi32(t11, sh), m8);
+        // (a run-time count: the shift-by-register forms, which NEON has too)
+        const __m128i shv = _mm_cvtsi32_si128(sh);
+        __m128i a0 = _mm_and_si128(_mm_srl_epi32(t00, shv), m8), a1 = _mm_and_si128(_mm_srl_epi32(t10, shv), m8);
+        __m128i b0 = _mm_and_si128(_mm_srl_epi32(t01, shv), m8), b1 = _mm_and_si128(_mm_srl_epi32(t11, shv), m8);
         __m128i top = _mm_madd_epi16(_mm_or_si128(a0, _mm_slli_epi32(a1, 16)), wu);
         __m128i bot = _mm_madd_epi16(_mm_or_si128(b0, _mm_slli_epi32(b1, 16)), wu);
         __m128i s = _mm_add_epi32(_mm_mullo_epi32(top, gv), _mm_mullo_epi32(bot, fv));
-        o = _mm_or_si128(o, _mm_slli_epi32(_mm_and_si128(_mm_srli_epi32(s, 16), m8), sh));
+        o = _mm_or_si128(o, _mm_sll_epi32(_mm_and_si128(_mm_srli_epi32(s, 16), m8), shv));
     }
     out = o;
     return true;
@@ -1393,7 +1396,7 @@ uint64_t SpinWait(const std::atomic<uint64_t> &w, uint64_t v, long ns)
             uint64_t x = w.load(std::memory_order_acquire);
             if (x != v)
                 return x;
-            __builtin_ia32_pause();
+            port_cpu_pause();
         }
         if (std::chrono::steady_clock::now() > until)
             return w.load(std::memory_order_acquire);
@@ -1457,7 +1460,7 @@ void StartWorkers()
         std::thread(WorkerMain, k).detach();
     if (const char *v = getenv("PORT_PIXEL_DEBUG"))
         sscanf(v, "%d,%d", &g_dbgX, &g_dbgY);
-    g_fastOk = __builtin_cpu_supports("avx2") && !getenv("PORT_GS_NOFAST") && g_dbgX < 0;
+    g_fastOk = PORT_HAVE_AVX2() && !getenv("PORT_GS_NOFAST") && g_dbgX < 0;
 }
 
 // Pending: the memory the primitives since the last barrier draw to (with
@@ -1539,7 +1542,7 @@ void Barrier(Wait why)
             if (spin > 2000)
                 std::this_thread::yield();
             else
-                __builtin_ia32_pause();
+                port_cpu_pause();
         }
     }
     g_minDone = g_next;
@@ -1702,7 +1705,7 @@ void WaitDone(uint64_t i)
         if (spin > 2000)
             std::this_thread::yield();
         else
-            __builtin_ia32_pause();
+            port_cpu_pause();
     }
 }
 
@@ -2422,7 +2425,7 @@ void WriteReg(uint32_t reg, uint64_t v)
             }
             // a game frame (Flip) moves DISPFB; render-to-texture passes
             // and readbacks send FINISH too
-            volatile uint64_t *priv = (volatile uint64_t *)0x12000000;
+            volatile uint64_t *priv = (volatile uint64_t *)PORT_HW(0x12000000);
             uint64_t d1 = priv[0x70 / 8], d2 = priv[0x90 / 8];
             if (d1 != g_lastDispfb[0] || d2 != g_lastDispfb[1])
                 __atomic_add_fetch(&g_flips, 1, __ATOMIC_RELAXED);
@@ -2433,7 +2436,7 @@ void WriteReg(uint32_t reg, uint64_t v)
         __atomic_add_fetch(&g_finishes, 1, __ATOMIC_RELAXED);
         // CSR.FINISH, atomically: the game thread and the vblank handler
         // write CSR too (port_gs_csr_ack)
-        __atomic_or_fetch((uint64_t *)0x12001000, 2, __ATOMIC_SEQ_CST);
+        __atomic_or_fetch((uint64_t *)PORT_HW(0x12001000), 2, __ATOMIC_SEQ_CST);
         break;
     case 0x62: break;  // LABEL
     default: LogOnce(reg); break;
@@ -2800,7 +2803,7 @@ namespace {
 // Would gs_read_display give a picture?
 bool DisplayOk()
 {
-    volatile uint64_t *priv = (volatile uint64_t *)0x12000000;
+    volatile uint64_t *priv = (volatile uint64_t *)PORT_HW(0x12000000);
     uint64_t pmode = priv[0];
     for (int n = 1; n <= 2; n++) {
         if (!(pmode & n))
@@ -2817,7 +2820,7 @@ bool DisplayOk()
 
 bool gs_read_display(PortFrame &rgba, int &w, int &h)
 {
-    volatile uint64_t *priv = (volatile uint64_t *)0x12000000;
+    volatile uint64_t *priv = (volatile uint64_t *)PORT_HW(0x12000000);
     uint64_t pmode = priv[0];
     bool en1 = pmode & 1, en2 = pmode & 2;
     if (!en1 && !en2)
@@ -2935,5 +2938,5 @@ void gs_debug(FILE *f)
 // readbacks they guard sync with the GS anyway, gs_read_image.)
 extern "C" void port_gs_csr_ack(unsigned int v)
 {
-    __atomic_and_fetch((uint64_t *)0x12001000, ~(uint64_t)(v & 0x1F), __ATOMIC_SEQ_CST);
+    __atomic_and_fetch((uint64_t *)PORT_HW(0x12001000), ~(uint64_t)(v & 0x1F), __ATOMIC_SEQ_CST);
 }

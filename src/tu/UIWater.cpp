@@ -292,7 +292,7 @@ static inline float Fabs(float x)
 static inline int Max(int a, int b) { return a > b ? a : b; }
 static inline int Min(int a, int b) { return a < b ? a : b; }
 
-#define UNCACHED(p) ((WaterPatchCell *)((unsigned int)(p) | EE_UNCACHED_ACCEL))
+#define UNCACHED(p) ((WaterPatchCell *)PS2_ADDR((unsigned int)(p) | EE_UNCACHED_ACCEL))
 
 // One step of the wave simulation on the MMI unit: each 8-wide cell row of
 // the current buffer is filtered with its neighbours into the other buffer

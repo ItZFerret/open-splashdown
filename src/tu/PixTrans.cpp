@@ -879,7 +879,7 @@ int DitherImage(void *src, int srcFormat, int width, int height, int srcPitch, i
                 next[-1].b += db * 3 / 16;
             }
         }
-        src = (void *)((int)src + (srcPitch * bpp >> 3));
+        src = (void *)PS2_ADDR(((int)src + (srcPitch * bpp >> 3)));
     }
     return 1;
 }

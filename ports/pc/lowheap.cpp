@@ -16,6 +16,7 @@
 #ifndef __linux__
 #include "port.h"
 #include "port_os.h"
+#include "port_ptr32.h"
 
 #include <algorithm>
 #include <cstdlib>
@@ -27,7 +28,17 @@ namespace {
 
 // ---- the game heap --------------------------------------------------------
 
+// x86-64: the region ends here. arm64 macOS: the heap is an array in the
+// executable itself (its zero-fill section costs nothing until touched):
+// the space after the executable belongs to the system's allocations
+// there, and the array's 32-bit addresses still end below 256 MB.
+#if defined(__aarch64__)
+const size_t kArena = 176u << 20;
+__attribute__((aligned(16384))) char g_arena[kArena];
+uintptr_t kEnd;
+#else
 const uintptr_t kEnd = 0x0FF00000;
+#endif
 const size_t kHdr = 16;
 const size_t kMinBlock = 32;
 
@@ -89,6 +100,21 @@ void SetNextPrev(Block *b)
 
 void Init()
 {
+#if defined(__aarch64__)
+    // The first allocation can come before ports/pc/hw.cpp's HwInit (a
+    // system library's initializer calling operator new): the executable
+    // must be at the window's start before the arena's address means
+    // anything, so that is settled here too (it re-executes if not).
+    port_os_fix_address_space();
+    g_base = g_top = (uintptr_t)g_arena;
+    kEnd = g_base + kArena;
+    if (kEnd - PORT_GUEST_BASE > 0x0FF00000) {
+        static const char msg[] = "[port] fatal: the game heap ends above 256 MB of the game's window\n";
+        fwrite(msg, 1, sizeof msg - 1, stderr);
+        abort();
+    }
+    return;
+#endif
     // The first address the executable and what the loader put after it
     // leave free, in 16 MB steps; at least 96 MB must be left.
     for (uintptr_t base = 0x01000000; base <= kEnd - (96u << 20); base += 0x01000000)
@@ -151,7 +177,7 @@ void SplitTail(Block *b, size_t size)
 
 void *GameAlloc(size_t size, size_t align)
 {
-    if (size > kEnd)
+    if (size > (256u << 20))
         return nullptr;
     size_t need = std::max(kMinBlock, ((size + 15) & ~(size_t)15) + kHdr);
     std::lock_guard<std::mutex> lock(g_lock);
@@ -348,6 +374,11 @@ uintptr_t port_heapguard_end(void)
 
 uintptr_t port_game_heap_end(void)
 {
+    if (!g_base) {
+        std::lock_guard<std::mutex> lock(g_lock);
+        if (!g_base)
+            Init();
+    }
     return kEnd;
 }
 

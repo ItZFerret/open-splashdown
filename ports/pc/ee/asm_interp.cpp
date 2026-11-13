@@ -15,6 +15,7 @@
 //   D_PCR selects have finished (STR clear).
 #include "port_asm.h"
 #include "port.h"
+#include "port_ptr32.h"
 
 #include <cmath>
 #include <cstdio>
@@ -451,7 +452,8 @@ void SetF(const Arg &a, float f)
 
 void *Addr(const Arg &a)
 {
-    return (void *)(uintptr_t)(GR(a).ud[0] + a.imm);
+    // (a register may hold a 32-bit game address: a literal the asm built)
+    return (void *)port_host_addr(GR(a).ud[0] + a.imm);
 }
 
 float *VF(const Arg &a)
@@ -514,12 +516,12 @@ void Run(const Prog *p)
             for (int ch = 0; ch < 10; ch++) {
                 static const uintptr_t kBase[10] = {0x10008000, 0x10009000, 0x1000A000, 0x1000B000, 0x1000B400,
                                                     0x1000C000, 0x1000C400, 0x1000C800, 0x1000D000, 0x1000D400};
-                uint32_t chcr = *(volatile uint32_t *)kBase[ch];
+                uint32_t chcr = *(volatile uint32_t *)PORT_HW(kBase[ch]);
                 if (chcr & 0x100)
                     port_log("DMA %s still running: CHCR %08x MADR %08x TADR %08x", port_dma_channel_name(ch), chcr,
-                             *(volatile uint32_t *)(kBase[ch] + 0x10), *(volatile uint32_t *)(kBase[ch] + 0x30));
+                             *(volatile uint32_t *)PORT_HW(kBase[ch] + 0x10), *(volatile uint32_t *)PORT_HW(kBase[ch] + 0x30));
             }
-            port_log("D_PCR %08x", *(volatile uint32_t *)0x1000E020);
+            port_log("D_PCR %08x", *(volatile uint32_t *)PORT_HW(0x1000E020));
             Fail("runaway loop", p->insns[pc].text);
         }
         const Insn &in = p->insns[pc];

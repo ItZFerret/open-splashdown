@@ -98,9 +98,9 @@ void SearchList::InsertObject(SearchableObject *obj, unsigned int flags, _D3DVEC
 {
     // flags is the slot NextPlacementCode handed out; a reused slot comes off
     // the free list (its link | 2), otherwise the last block grows.
-    SearchSlot *slot = (SearchSlot *)flags;
+    SearchSlot *slot = (SearchSlot *)PS2_ADDR(flags);
     if (m_freeList && flags == m_freeList)
-        m_freeList = ((SearchSlot *)m_freeList)->link & ~3;
+        m_freeList = ((SearchSlot *)PS2_ADDR(m_freeList))->link & ~3;
     else
         m_lastBlockCount++;
     *(SearchableObject **)slot = obj;
@@ -112,7 +112,7 @@ void SearchList::InsertObject(SearchableObject *obj, unsigned int flags, _D3DVEC
 
 void SearchList::RemoveObject(SearchableObject *obj, unsigned int slot)
 {
-    SearchSlot *s = (SearchSlot *)slot;
+    SearchSlot *s = (SearchSlot *)PS2_ADDR(slot);
 #line 130 "SearchList.cpp"
     ASSERT(s->link == (unsigned int)obj, "RemoveObject: the location in the list that code specifies does not contain lpObject! The caller is trying to remove from the wrong place!");
     s->link = m_freeList | 2;

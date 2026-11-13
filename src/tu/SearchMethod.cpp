@@ -58,7 +58,7 @@ void SearchMethod::PrepareGeometryOnSearchListContents(SearchableObject **list, 
         unsigned int entry = (unsigned int)*list;
         if (entry & 2)
             continue;
-        SearchableObject *object = (SearchableObject *)(entry & ~1);
+        SearchableObject *object = (SearchableObject *)PS2_ADDR((entry & ~1));
         if (!object->m_searchVisible || object->m_hidden)
             continue;
         if (object->m_typeID == m_soultreeObjectType) {

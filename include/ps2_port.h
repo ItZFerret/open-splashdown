@@ -23,6 +23,11 @@
  * PS2_PTR_INT: an integer the game keeps pointers in (`int m_offsets[63]`
  * holding 63 pointers): int on the PS2, intptr_t on the PC.
  *
+ * PS2_ADDR(x): a pointer kept in a 32-bit integer, where the source casts
+ * it back to a pointer (`(T *)PS2_ADDR(x)`): x on the PS2 and on a PC whose
+ * game memory lies below 4 GB; where it doesn't (arm64 macOS,
+ * ports/pc/include/port_ptr32.h), the address that 32-bit value stands for.
+ *
  * PS2_OVERRUN(n): room for n elements retail writes past the end of a local
  * array. 0 on the PS2, so the frame stays retail's (the write lands on the
  * neighbouring stack slot, harmlessly, as it did there); n on the PC, where
@@ -37,6 +42,7 @@
 #define PS2_PTR_SIZE 4
 #define PS2_SIZEOF_PTR(T) sizeof(T *)
 #define PS2_PTR_INT int
+#define PS2_ADDR(x) (x)
 #define PS2_OVERRUN(n) 0
 #endif
 

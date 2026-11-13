@@ -5,6 +5,7 @@ A port is a platform layer that builds the game's own sources (`src/tu/`, unchan
 | Target | Directory | Status |
 |---|---|---|
 | Linux x86-64 | [`pc/`](pc/) | ✅ Whole game at 30 FPS |
+| macOS, Apple silicon (native arm64) | [`pc/`](pc/) | ✅ Menus, races and movies at 30 FPS |
 | macOS (x86-64; Apple silicon through Rosetta) | [`pc/`](pc/) | ✅ Menus and races at 30 FPS; movies need an x86-64 ffmpeg |
 | Windows x86-64 (MinGW-w64) | [`pc/`](pc/) | 🔧 Builds and links; not yet run on Windows |
 

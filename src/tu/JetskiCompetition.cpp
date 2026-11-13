@@ -961,7 +961,7 @@ JetskiCompetition *JetskiCompetition::Create()
             } else {
                 PSXprintf("PB PROB:Can't load %s\n", "Audio\\songs.pb");
             }
-            m_music = (PSXMusic *)LpGame->m_auralScape->CreateMusic(1, 12, m_x1F0->m_groupID);
+            m_music = (PSXMusic *)PS2_ADDR(LpGame->m_auralScape->CreateMusic(1, 12, m_x1F0->m_groupID));
             if (m_music) {
                 m_x1F0->SetVolume(LpGame->m_gameOptions->m_musicVolume);
                 m_music->Shuffle(1);

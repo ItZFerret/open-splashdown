@@ -2,11 +2,12 @@
 
 The game's own code, unchanged from the matching build, compiled with clang and running on a PC version of the hardware it was written for. That hardware layer is the retail VU1 microcode in a recompiler that models the VU pipeline, a multithreaded software GS (AVX2) presented through SDL3, the IPU, PSS movies through libavcodec, a PC version of the IOP sound driver mixing to SDL3 audio, gamepads and the keyboard as DualShock 2 pads, and the memory card as a directory.
 
-Targets, all x86-64 (the software GS is AVX2, and the game's 32-bit pointers need every address it sees below 4 GB):
+Targets. The game keeps pointers in 32 bits, so on x86-64 every address it sees lies below 4 GB; Apple silicon forbids that, so the native macOS build keeps the game's memory in a 4 GB window instead (`include/port_ptr32.h`). The software GS and VU1 are written with x86 vector intrinsics, which the arm64 build takes from SIMDe:
 
 | Target | Output | Status |
 |---|---|---|
 | Linux | `build/port/splashdown` | ✅ whole game at 30 FPS |
+| macOS 14.4+, Apple silicon, native (`--arch arm64`) | `build/port-macos-arm64/splashdown` | ✅ menus, races and movies at 30 FPS; about twice the Rosetta build's speed |
 | macOS 14.4+ (Intel, or Apple silicon through Rosetta) | `build/port-macos/splashdown` | ✅ menus and races at 30 FPS |
 | Windows 10+ (MinGW-w64) | `build/port-windows/splashdown.exe` | 🔧 builds and links, not yet run on Windows |
 
@@ -43,6 +44,24 @@ SPLASHDOWN_DISC=/path/to/splashdown.iso build/port-macos/splashdown
 The build also assembles `build/port-macos/Splashdown.app`, which can be moved anywhere and opened from Finder. Its launcher (`ports/pc/macos/launch`) uses the first `.iso` or `.bin` in the folder the app is in, else asks for one and remembers it, and keeps the game's output in `~/Library/Logs/Splashdown.log`.
 
 An x86-64 ffmpeg (libavcodec, libavutil) installed in the same prefix turns movie playback on. zlib is the system's. Saves go to `~/Library/Application Support/splashdown/memcard0/`.
+
+#### Native Apple silicon
+
+```sh
+brew install sdl3 ffmpeg pkgconf
+mkdir -p build/deps/simde/simde/x86     # SIMDe's amalgamated x86/avx2.h (github.com/simd-everywhere/simde releases)
+cp /path/to/simde-amalgamated/x86/avx2.h build/deps/simde/simde/x86/
+python3 tools/port/build.py --arch arm64 -j 8
+SPLASHDOWN_DISC=/path/to/splashdown.iso build/port-macos-arm64/splashdown
+```
+
+Homebrew's libraries are arm64, so this build uses them directly (and plays the movies). How it differs from the x86-64 builds:
+
+- **The window.** A 32-bit value `v` stands for the address `0x100000000 + v`, and 0 for null: `Ptr32` (`PS2_PTR`), `PS2_ADDR(x)` at the 39 places the game casts an integer back to a pointer, and `PORT_HW(addr)` for register addresses (`tools/port/rewrite.py` adds it to the game's literals). Truncating a pointer gives its 32-bit value back. On x86-64 all three are the identity.
+- **Where things are.** The executable loads at the window's start once address randomization is off (`os.cpp` re-executes for that). The EE and GS registers and the scratchpad are segments of the executable at their addresses in the window (`-segaddr`; `hw.cpp`), and the game's heap is an array in it (`lowheap.cpp`): by the time the port's code runs, the system has taken the addresses after the executable.
+- **Arithmetic.** Built with `-ffp-contract=off`, so floating point rounds as on x86-64. The golden session's race frames match the x86-64 build's pixel for pixel; the animated water behind the menus does not (cause not found).
+
+A missed conversion shows as a fault at an address below 4 GB: that address is the game's 32-bit value.
 
 ### Windows
 

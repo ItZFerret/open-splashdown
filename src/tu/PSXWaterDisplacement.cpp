@@ -753,7 +753,7 @@ PSXWaterDisplacement *PSXWaterDisplacement::Create(PSXWater *water, char *name, 
 
 void PSXWaterDisplacement::RenderVifCodes()
 {
-    u_long *codes = (u_long *)UNCACHED_ACCEL(m_vifCodes);
+    u_long *codes = (u_long *)PS2_ADDR(UNCACHED_ACCEL(m_vifCodes));
     Camera *camera = LpRenderTarget->m_camera;
     int top = (2048 - camera->m_viewport.Height / 2) * 16;
     int bottom = top + GameWater->m_gridSize * 16;
@@ -943,11 +943,11 @@ int getFrameBuffer()
     }
     LockRenderQueueState = 1;
     if (gComputeWake && !LpGame->m_paused) {
-        getTextureFromVideoMemory((unsigned char *)UNCACHED(gpWakeFrothMaskMap), address, 0x280, 0x80, 0x80,
+        getTextureFromVideoMemory((unsigned char *)PS2_ADDR(UNCACHED(gpWakeFrothMaskMap)), address, 0x280, 0x80, 0x80,
                                   (int)gpCamera->m_viewport.X + (int)gViewport[3].X - 1, gpCamera->m_viewport.Y, 0, 4);
         return LockRenderQueueState;
     }
-    getTextureFromVideoMemory((unsigned char *)UNCACHED(gWaterDmaData), giZbufAddress, 0x280, 0x5C,
+    getTextureFromVideoMemory((unsigned char *)PS2_ADDR(UNCACHED(gWaterDmaData)), giZbufAddress, 0x280, 0x5C,
                               (GameWater->m_gridSize + 3) / 4 * 4, (int)gpCamera->m_viewport.X + gReformattedViewportsXOffset,
                               gpCamera->m_viewport.Y, 0x30, 4);
     LockRenderQueueState = 2;
@@ -980,7 +980,7 @@ int textureTransferFromVideoMemoryCompleteHandler(int)
             gZValueAtBottomOfScreen.z[3] = gZValue;
         for (i = 0; i < GameWater->m_numTiles; i++) {
             for (j = 1; j <= giTemp; j++) {
-                row = (unsigned char *)UNCACHED_ACCEL(gWaterDmaData + ((i + 1) * GameWater->m_gridSize - j) * WATER_ROW_SIZE);
+                row = (unsigned char *)PS2_ADDR(UNCACHED_ACCEL(gWaterDmaData + ((i + 1) * GameWater->m_gridSize - j) * WATER_ROW_SIZE));
                 memset(row + 0x10, 0, 0xF0);
                 *(int128_t *)(row + 0x110) = *(int128_t *)(row + 0x120) = *(int128_t *)(row + 0x130) =
                     *(int128_t *)(row + 0x140) = *(int128_t *)(row + 0x150) = gZValueAtBottomOfScreen.q;
@@ -996,7 +996,7 @@ int textureTransferFromVideoMemoryCompleteHandler(int)
         }
         ((PSXRenderTarget *)LpRenderTarget)->LockTrySendRenderQueue(0);
     } else {
-        getTextureFromVideoMemory((unsigned char *)UNCACHED(gWaterDmaData + strip * qwords * 16), giZbufAddress, 0x280,
+        getTextureFromVideoMemory((unsigned char *)PS2_ADDR(UNCACHED(gWaterDmaData + strip * qwords * 16)), giZbufAddress, 0x280,
                                   0x5C, (GameWater->m_gridSize + 3) / 4 * 4,
                                   (int)gpCamera->m_viewport.X + gReformattedViewportsXOffset + strip * 0x5C, gpCamera->m_viewport.Y,
                                   0x30, 4);

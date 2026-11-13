@@ -7,6 +7,7 @@
 // REF tag) are the real ones, and VU1 runs the real microcode
 // (ports/pc/vu/vu1.cpp). Here: the programs' names, for logs.
 #include "port.h"
+#include "port_ptr32.h"
 
 #include <cstring>
 
@@ -73,9 +74,9 @@ __attribute__((constructor(102))) static void RelocatePackets()
 {
     for (const uint32_t *r = port_vurelocs; r < port_vurelocs_end; r += 2) {
         uintptr_t target = (uintptr_t)port_vupackets_start + r[1];
-        if (target >> 32)
-            port_fatal("the VU packets lie above 4 GB (%p): the executable must be linked low", (void *)target);
-        uint32_t t = (uint32_t)target;
+        // as the game's 32-bit address (fatal if the executable isn't in
+        // the game's window: include/port_ptr32.h)
+        uint32_t t = port_ptr32((const void *)target);
         memcpy(port_vupackets_start + r[0], &t, 4);
     }
 }

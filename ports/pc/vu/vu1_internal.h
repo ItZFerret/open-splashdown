@@ -8,7 +8,7 @@
 
 #include <cstdint>
 #include <cstring>
-#include <emmintrin.h>
+#include "port_simd.h"
 
 namespace vu1i {
 

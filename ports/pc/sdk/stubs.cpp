@@ -3,6 +3,7 @@
 // game takes for success. Signatures follow the game's own declarations;
 // struct arguments are void * where the stub doesn't look inside.
 #include "port.h"
+#include "port_ptr32.h"
 #include "audio/audio.h"
 
 #include <cstdarg>
@@ -88,7 +89,7 @@ unsigned int sceSifSetDma(void *sdd, int len)
     };
     const SifDmaData *d = (const SifDmaData *)sdd;
     for (int i = 0; i < len; i++)
-        audio::IopWrite(d[i].addr, (const void *)(uintptr_t)d[i].data, d[i].size);
+        audio::IopWrite(d[i].addr, (const void *)port_guest_addr(d[i].data), d[i].size);
     return 1;
 }
 
@@ -139,7 +140,7 @@ void *sceDmaGetChan(int id)
     };
     if (id < 0 || id >= 10)
         port_fatal("sceDmaGetChan(%d)", id);
-    return (void *)kBase[id];
+    return (void *)PORT_HW(kBase[id]);
 }
 
 void sceDmaReset(int mode)

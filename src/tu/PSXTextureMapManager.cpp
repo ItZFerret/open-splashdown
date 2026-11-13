@@ -1031,7 +1031,7 @@ PSXTextureMapManager::~PSXTextureMapManager()
         delete m_x118;
     if (m_x114) {
         // Strip the segment bits (an uncached alias) before freeing.
-        m_x114 = (unsigned int *)((unsigned int)m_x114 & 0x0FFFFFFF);
+        m_x114 = (unsigned int *)PS2_ADDR(((unsigned int)m_x114 & 0x0FFFFFFF));
         free(m_x114);
     }
 }
@@ -1100,7 +1100,7 @@ PSXTextureMapManager *PSXTextureMapManager::Create()
     // (redundant cast: retail loads the texture pointer first)
     m_x118->PrepareTransferTexture((unsigned char *)m_x114, 0x37FF, 2, 2, 0, 0, 0, 32, 0);
     m_x118->SendTexture(1);
-    m_x114 = (unsigned int *)(((unsigned int)m_x114 & 0x0FFFFFFF) | EE_UNCACHED);
+    m_x114 = (unsigned int *)PS2_ADDR((((unsigned int)m_x114 & 0x0FFFFFFF) | EE_UNCACHED));
     return this;
 }
 #pragma alignlabel reset
@@ -2249,7 +2249,7 @@ void PSXTextureMapManager::IPUDecompress(unsigned char *dst, unsigned char *src,
     unsigned int qwc = (unsigned int)(bw * t * 512) / 16;
     asm(".set reorder");
     t = (int)LpTextureMapManager->m_ipuTransfer;
-    ((IpuTextureTransfer *)t)->TransferTexture(src, size);
+    ((IpuTextureTransfer *)PS2_ADDR(t))->TransferTexture(src, size);
     sceIpuSync(0, 0);
     IPU_CMD = 0;                                // BCLR
     LpTextureMapManager->m_ipuTransfer->SendTexture(0);

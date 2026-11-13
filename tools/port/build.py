@@ -62,6 +62,11 @@ LOWHEAP_DEFS = ["-Dmalloc=port_malloc", "-Dfree=port_free", "-Dcalloc=port_callo
                 "-Drealloc=port_realloc", "-Dmemalign=port_memalign"]
 
 
+# True when the target's libraries are the build host's own (pkg-config finds
+# them): Linux, and macOS built for the host's CPU.
+HOST_LIBS = True
+
+
 def host_target():
     return {"darwin": "macos", "win32": "windows", "cygwin": "windows", "msys": "windows"}.get(sys.platform, "linux")
 
@@ -87,14 +92,44 @@ def dep_prefixes(target):
     return out
 
 
-def configure(target):
+def configure(target, arch="x86_64"):
     """Set the flags for a target other than Linux. The port needs every
     game address below 4 GB and the executable's own below 256 MB (ports/pc/os.cpp):
     both link at 0x400000, without address randomization."""
     global OUT, EXE, VU_FORMAT, CXX
-    OUT = os.path.join(ROOT, "build/port-" + target)
+    OUT = os.path.join(ROOT, "build/port-" + target + ("-arm64" if arch == "arm64" else ""))
     cflags, libdirs = prefix_flags(dep_prefixes(target))
     GAME_FLAGS.extend(LOWHEAP_DEFS)
+    if target == "macos" and arch == "arm64":
+        # Native Apple silicon: the game's memory is a 4 GB window at the
+        # executable's default address (ports/pc/include/port_ptr32.h), so
+        # no link options; the x86 vector code goes through SIMDe
+        # (build/deps/simde/, or a PORT_DEPS prefix); SDL3, zlib and ffmpeg
+        # are the host's (Homebrew's are arm64), found by pkg-config.
+        VU_FORMAT = "macho"
+        # -ffp-contract=off: arm64 compilers fuse a*b+c into one rounding
+        # by default, x86-64 ones don't; without it the game's arithmetic
+        # (and so its physics and the golden frames) drifts from x86-64's
+        archf = ["-arch", "arm64", "-mmacosx-version-min=14.4", "-ffp-contract=off"]
+        for flags in (GAME_FLAGS, PORT_FLAGS, ASM_FLAGS, LINK_FLAGS):
+            flags[:] = [f for f in flags if f not in ("-m64", "-no-pie", "-fno-pie", "-pthread")] + archf
+        simde = [p for p in dep_prefixes(target) + [os.path.join(ROOT, "build/deps/simde")]
+                 if os.path.exists(os.path.join(p, "simde/x86/avx2.h"))]
+        if not simde:
+            sys.exit("build.py: the arm64 build needs SIMDe's x86/avx2.h as build/deps/simde/simde/x86/avx2.h "
+                     "(ports/pc/README.md)")
+        PORT_FLAGS.append("-I" + simde[0])
+        pc = subprocess.run(["pkg-config", "--cflags", "--libs", "sdl3"], capture_output=True, text=True)
+        if pc.returncode:
+            sys.exit("build.py: pkg-config can't find sdl3 (brew install sdl3)")
+        words = pc.stdout.split()
+        PORT_FLAGS.extend(w for w in words if w.startswith("-I") or w.startswith("-D"))
+        LIBS[:] = [w for w in words if w.startswith("-L") or w.startswith("-l")] + ["-lz"]
+        # the PS2's register windows and scratchpad, as segments at their
+        # addresses in the game's window (ports/pc/hw.cpp)
+        LINK_FLAGS.extend(["-Wl,-segaddr,__PS2EE,0x110000000", "-Wl,-segaddr,__PS2GS,0x112000000",
+                           "-Wl,-segaddr,__PS2SPR,0x170000000"])
+        return [], []
     if target == "macos":
         VU_FORMAT = "macho"
         # os_sync_wait_on_address (the port's futex) is macOS 14.4's
@@ -148,7 +183,7 @@ def ffmpeg_flags(target, prefixes):
     host's pkg-config would name libraries of the wrong architecture)."""
     if os.environ.get("PORT_NO_FFMPEG", "0") != "0":
         return None
-    if target != "linux":
+    if target != "linux" and HOST_LIBS is False:
         for p in prefixes:
             if os.path.exists(os.path.join(p, "include/libavcodec/avcodec.h")):
                 return [], ["-lavcodec", "-lavutil"]
@@ -233,14 +268,19 @@ def main():
     ap.add_argument("--no-link", action="store_true")
     ap.add_argument("--asan", action="store_true")
     ap.add_argument("--target", choices=["linux", "macos", "windows"], default=host_target())
+    ap.add_argument("--arch", choices=["x86_64", "arm64"], default="x86_64",
+                    help="macOS only: arm64 builds natively for Apple silicon (build/port-macos-arm64)")
     args = ap.parse_args()
-    global OUT, VU_PACKETS
+    if args.arch == "arm64" and args.target != "macos":
+        sys.exit("--arch arm64: macOS only")
+    global OUT, VU_PACKETS, HOST_LIBS
+    HOST_LIBS = args.target == "linux" or args.arch == "arm64"
     extra = []
     prefixes = dep_prefixes(args.target)
     if args.target != "linux":
         if args.asan:
             sys.exit("--asan: Linux only")
-        configure(args.target)
+        configure(args.target, args.arch)
         VU_PACKETS = os.path.join(OUT, "gen/vupackets.s")
     if args.asan:
         OUT = os.path.join(ROOT, "build/port-asan")

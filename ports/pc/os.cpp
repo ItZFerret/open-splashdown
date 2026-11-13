@@ -7,12 +7,18 @@
 // - macOS: x86-64 only (Rosetta on Apple silicon: arm64 processes can't map
 //   anything below 4 GB). Linked with -pagezero_size 0x1000 -image_base
 //   0x400000 -no_pie; low addresses are then free and asked for by hint.
+// - macOS on Apple silicon, native: an arm64 process can't map anything
+//   below 4 GB at all, so the game's memory is the 4 GB window at
+//   PORT_GUEST_BASE (include/port_ptr32.h), which is where the executable
+//   loads once address randomization is off (port_os_fix_address_space
+//   re-executes for that); "below 4 GB" means "in the window" there.
 // - Windows: linked with --image-base 0x400000 and no dynamic base;
 //   VirtualAlloc at chosen addresses. A thread's stack can't be placed, so
 //   a low-stack thread switches to one it mapped (and tells the TEB).
 #include "port_os.h"
 
 #include "port.h"
+#include "port_ptr32.h"
 
 #include <atomic>
 #include <cstdio>
@@ -38,7 +44,9 @@
 #include <linux/futex.h>
 #include <sys/syscall.h>
 #elif defined(__APPLE__)
+#include <crt_externs.h>
 #include <mach-o/dyld.h>
+#include <spawn.h>
 #include <os/os_sync_wait_on_address.h>
 #endif
 
@@ -139,6 +147,7 @@ void *port_map_low(size_t size)
 #else
     // Between the EE register windows' neighbourhood and the scratchpad's
     // (0x10000000, 0x12000000, 0x70000000), then above it, by first fit.
+    // (offsets in the game's window: PORT_GUEST_BASE is 0 on x86-64)
     static std::mutex lock;
     static uintptr_t next = 0x20000000;
     std::lock_guard<std::mutex> g(lock);
@@ -148,9 +157,9 @@ void *port_map_low(size_t size)
             a = 0x71000000u - (1 << 24);
             continue;
         }
-        if (port_map_at(a, size)) {
+        if (port_map_at((uintptr_t)(PORT_GUEST_BASE + a), size)) {
             next = RoundUp(a + size, 1 << 16);
-            return (void *)a;
+            return (void *)(uintptr_t)(PORT_GUEST_BASE + a);
         }
     }
     return nullptr;
@@ -163,6 +172,31 @@ void port_unmap(void *p, size_t size)
     VirtualFree(p, 0, MEM_RELEASE);
 #else
     munmap(p, size);
+#endif
+}
+
+void port_os_fix_address_space(void)
+{
+#if defined(__APPLE__) && defined(__aarch64__)
+    // The executable must sit at the window's start: run without address
+    // randomization, re-executing once to get that.
+    if (_dyld_get_image_vmaddr_slide(0) != 0) {
+        if (getenv("PORT_NOASLR_REEXEC"))
+            port_fatal("the executable is not at its link address even without address randomization");
+        char path[4096];
+        uint32_t size = sizeof path;
+        if (_NSGetExecutablePath(path, &size) != 0)
+            port_fatal("the executable's path is too long");
+        setenv("PORT_NOASLR_REEXEC", "1", 1);
+        posix_spawnattr_t attr;
+        posix_spawnattr_init(&attr);
+        posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETEXEC | 0x0100 /* _POSIX_SPAWN_DISABLE_ASLR */);
+        posix_spawn(nullptr, path, nullptr, &attr, *_NSGetArgv(), *_NSGetEnviron());
+        port_fatal("can't re-execute %s without address randomization", path);
+    }
+    if ((uintptr_t)_dyld_get_image_header(0) != PORT_GUEST_BASE)
+        port_fatal("the executable is at %p, not at the game's window (0x%llx)", (void *)_dyld_get_image_header(0),
+                   (unsigned long long)PORT_GUEST_BASE);
 #endif
 }
 

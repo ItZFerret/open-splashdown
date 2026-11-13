@@ -68,7 +68,7 @@ DmaPacket::DmaPacket(int size, int uncached)
     size = (size + 7) / 8 * 8;  // round up to 8 quadwords
     unsigned int *buffer = (unsigned int *)memalign(64, size * 16);
     if (uncached)
-        m_start = (unsigned int *)(((unsigned int)buffer & 0x0FFFFFFF) | EE_UNCACHED);
+        m_start = (unsigned int *)PS2_ADDR((((unsigned int)buffer & 0x0FFFFFFF) | EE_UNCACHED));
     else
         m_start = buffer;
     memset(m_start, 0, size * 16);
@@ -86,7 +86,7 @@ DmaPacket::~DmaPacket()
     // The packet buffer is addressed through an uncached mirror; free the
     // cached address.
     if (m_start)
-        free((void *)((unsigned int)m_start & 0x0FFFFFFF));
+        free((void *)PS2_ADDR(((unsigned int)m_start & 0x0FFFFFFF)));
 }
 
 

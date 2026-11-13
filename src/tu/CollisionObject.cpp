@@ -3146,10 +3146,10 @@ int CollisionObject::InstanceSoultreeHierarchyCollisionData(SoultreeObject *obje
         data->m_objects[i].m_object = objects[instance->m_objectIndices[i]];
         data->m_objects[i].m_transform = IdentityMatrix();
         data->m_x04[i] = 1;
-        data->m_objects[i].m_faceTree = (BoundingBoxTree *)instance->m_x0C[i];
+        data->m_objects[i].m_faceTree = (BoundingBoxTree *)PS2_ADDR(instance->m_x0C[i]);
         data->m_objects[i].m_tree = 0;
         data->m_objects[i].m_numVertices = instance->m_x08[i];
-        data->m_objects[i].m_vertices = (_D3DVECTOR *)instance->m_x14[i];
+        data->m_objects[i].m_vertices = (_D3DVECTOR *)PS2_ADDR(instance->m_x14[i]);
         data->m_objects[i].m_x90 = instance->m_matrices[i];
         data->m_objects[i].m_x00 = instance->m_x20;
     }

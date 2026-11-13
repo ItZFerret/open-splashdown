@@ -7,7 +7,9 @@
 #include <cfenv>
 #include <cstdio>
 #include <cstdlib>
+#if defined(__x86_64__)
 #include <xmmintrin.h>
+#endif
 
 extern "C" int splashdown_main(int argc, char **argv);
 // The game's render switches (debug keys on the PS2)
@@ -48,13 +50,16 @@ void *GameThread(void *p)
         int fe = kFpe[mode >= 1 && mode <= 4 ? mode : 1];
 #ifdef __linux__
         feenableexcept(fe);
-#else
+#elif defined(__x86_64__)
         // x86-64 float math is SSE: unmask the exceptions in MXCSR
         unsigned mask = _MM_GET_EXCEPTION_MASK();
         if (fe & FE_INVALID) mask &= ~_MM_MASK_INVALID;
         if (fe & FE_DIVBYZERO) mask &= ~_MM_MASK_DIV_ZERO;
         if (fe & FE_OVERFLOW) mask &= ~_MM_MASK_OVERFLOW;
         _MM_SET_EXCEPTION_MASK(mask);
+#else
+        (void)fe;
+        port_log("PORT_FPE: not available on this CPU");
 #endif
     }
     a->result = splashdown_main(a->argc, a->argv);

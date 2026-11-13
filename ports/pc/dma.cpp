@@ -15,6 +15,7 @@
 // end; TTE hands VIF1 a tag's upper 64 bits; a tag's IRQ bit ends the
 // transfer when CHCR.TIE is set); normal mode sends MADR/QWC.
 #include "port.h"
+#include "port_simd.h"
 
 #include "gs/gs.h"
 #include "vu/vu.h"
@@ -27,6 +28,7 @@
 #include <thread>
 #include <climits>
 #include "port_os.h"
+#include "port_ptr32.h"
 
 extern uintptr_t g_vif1_src;
 void port_ipu_dma_in(const void *data, uint32_t qwc, bool first);
@@ -68,7 +70,7 @@ void FutexWake(std::atomic<uint32_t> &w)
 
 volatile uint32_t &Reg(uintptr_t addr)
 {
-    return *(volatile uint32_t *)addr;
+    return *(volatile uint32_t *)PORT_HW(addr);
 }
 
 // A DMA address as a host pointer: the scratchpad (SPR bit or 0x7xxxxxxx),
@@ -76,8 +78,8 @@ volatile uint32_t &Reg(uintptr_t addr)
 uint8_t *Ptr(uint32_t addr, bool spr = false)
 {
     if (spr || (addr >> 28) == 7)
-        return (uint8_t *)(uintptr_t)(0x70000000 | (addr & 0x3FF0));
-    return (uint8_t *)(uintptr_t)(addr & 0x0FFFFFF0);
+        return (uint8_t *)(uintptr_t)PORT_HW(0x70000000 | (addr & 0x3FF0));
+    return (uint8_t *)(uintptr_t)PORT_HW(addr & 0x0FFFFFF0);
 }
 
 void Send(int ch, const uint8_t *data, uint32_t qwc)
@@ -101,12 +103,15 @@ bool Valid(uint32_t addr, uint32_t qwc, bool spr)
 {
     if (spr || (addr >> 28) == 7)
         return true;
+    // (as 32-bit game addresses: the executable starts at 0x400000 on
+    // x86-64, at the window's start on arm64)
     static uintptr_t top;
+    const uintptr_t bottom = PORT_GUEST_BASE ? 0x4000 : 0x400000;
     uintptr_t a = addr & 0x0FFFFFF0, end = a + (uintptr_t)qwc * 16;
-    if (a >= 0x400000 && end <= top)
+    if (a >= bottom && end <= top)
         return true;
-    top = port_game_heap_end();
-    return a >= 0x400000 && end <= top;
+    top = port_game_heap_end() - PORT_GUEST_BASE;
+    return a >= bottom && end <= top;
 }
 
 void BadTag(int ch, uint32_t tadr, uint64_t t)
@@ -127,10 +132,10 @@ void Unaligned(int ch, const char *what, uint32_t a, uint32_t tadr = 0)
         n++;
         port_log("DMA %s: %s 0x%x is not qword-aligned (tag at 0x%x)", kChannels[ch].name, what, a, tadr);
         if (tadr) {
-            const uint32_t *q = (const uint32_t *)(uintptr_t)(tadr - 0x20);
+            const uint32_t *q = (const uint32_t *)(uintptr_t)PORT_HW(tadr - 0x20);
             port_log("  around the tag: %08x %08x %08x %08x | %08x %08x %08x %08x | [%08x %08x %08x %08x] | %08x %08x %08x %08x",
                      q[0], q[1], q[2], q[3], q[4], q[5], q[6], q[7], q[8], q[9], q[10], q[11], q[12], q[13], q[14], q[15]);
-            const uint32_t *d = (const uint32_t *)(uintptr_t)(a & ~7u);
+            const uint32_t *d = (const uint32_t *)(uintptr_t)PORT_HW(a & ~7u);
             port_log("  data: %08x %08x %08x %08x %08x %08x", d[-2], d[-1], d[0], d[1], d[2], d[3]);
             a = tadr;   // name the object holding the tag
         }
@@ -140,7 +145,7 @@ void Unaligned(int ch, const char *what, uint32_t a, uint32_t tadr = 0)
         static uint64_t hi = getenv("PORT_VTABLE_MAX") ? strtoull(getenv("PORT_VTABLE_MAX"), nullptr, 16) : 0;
         for (int k = 0; lo && k < 1024; k++) {
             uint64_t w;
-            uintptr_t at = (a & ~7u) - (uintptr_t)k * 8;
+            uintptr_t at = (uintptr_t)PORT_HW(a & ~7u) - (uintptr_t)k * 8;
             memcpy(&w, (const void *)at, 8);
             if (w >= lo && w < hi) {
                 port_log("  vtable %llx at -0x%lx", (unsigned long long)w, (unsigned long)(a - at));
@@ -244,7 +249,7 @@ void Transfer(int ch)
         break;
     case 8: case 9: {
         uint32_t sadr = Reg(kChannels[ch].base + 0x80) & 0x3FF0;
-        uint8_t *spr = (uint8_t *)(uintptr_t)(0x70000000 + sadr);
+        uint8_t *spr = (uint8_t *)(uintptr_t)PORT_HW(0x70000000 + sadr);
         if (mode != 0) {
             port_log("DMA %s: mode %u not supported", kChannels[ch].name, mode);
             break;
@@ -343,7 +348,7 @@ void DmaThread()
         } else if (++idle > 2048) {
             FutexWait(g_wake, wake, idle > 2048 + 2000 ? 1000000 : 50000);
         } else {
-            __builtin_ia32_pause();
+            port_cpu_pause();
         }
     }
 }
@@ -361,7 +366,7 @@ extern "C" void port_dma_unaligned(const void *addr, const char *where)
     if (n < 64)
         seen[n++] = where;
     // where: a name, or a caller's return address (addr2line -e build/port/splashdown)
-    if ((uintptr_t)where < 0x400000 || (uintptr_t)where > 0x800000)
+    if ((uintptr_t)where - PORT_GUEST_BASE < 0x4000 || (uintptr_t)where - PORT_GUEST_BASE > 0x800000)
         port_log("DMA: %s: address %p is not qword-aligned", where, addr);
     else
         port_log("DMA: address %p is not qword-aligned, from %p", addr, (const void *)where);

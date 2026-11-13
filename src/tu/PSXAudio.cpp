@@ -271,7 +271,7 @@ void PSXSoundInterface::LoadRequestedSounds()
             char *name = m_soundStringTable->GetString(i);
             PSXSound *sound = (PSXSound *)m_soundStringTable->GetPointer(i);
             sound->LoadPreviouslyCreatedSound(name);
-            m_soundStringTable->SetPointer(i, (void *)sound->m_soundHandle);
+            m_soundStringTable->SetPointer(i, (void *)PS2_ADDR(sound->m_soundHandle));
             m_soundStringTable->ClearRequested(i);
         }
     }

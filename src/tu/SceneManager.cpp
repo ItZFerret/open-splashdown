@@ -2518,10 +2518,10 @@ int Scene::ReadAnimationData(void (*progress)(int *), int a)
             }
             if (ANIM.m_isCar) {
                 float y1, y2; // only to reproduce retail's zero-argument copies (see the header)
-                if (!AddChild((GameObject *)(ANIM.m_car = new CarProcedural(1))
+                if (!AddChild((GameObject *)PS2_ADDR((ANIM.m_car = new CarProcedural(1))
                                   ->Create(name, colName, 0, vueName, &ANIM.m_position, fps, pathIsLevel,
                                            frontWheelsTurn, lagDistance, One(), numberOfTires, y1 = y2 = 0.0f, y1--, y2--,
-                                           driveOnSoultrees, 0), 2)) {
+                                           driveOnSoultrees, 0)), 2)) {
                     sprintf(message, "\nScene: Cannot create procedural model from %s.\n\n", fileName);
                     ReportError(message);
                     return 0;
@@ -2529,10 +2529,10 @@ int Scene::ReadAnimationData(void (*progress)(int *), int a)
             }
             if (ANIM.m_isBoat) {
                 float y1, y2; // as above
-                if (!AddChild((GameObject *)(ANIM.m_boat = new BoatProcedural(1))
+                if (!AddChild((GameObject *)PS2_ADDR((ANIM.m_boat = new BoatProcedural(1))
                                   ->Create(name, colName, 0, vueName, &ANIM.m_position, fps, pathIsLevel,
                                            frontWheelsTurn, lagDistance, One(), numberOfTires, y1 = y2 = 0.0f, y1--, y2--,
-                                           driveOnSoultrees, 0), 2)) {
+                                           driveOnSoultrees, 0)), 2)) {
                     sprintf(message, "\nScene: Cannot create procedural model from %s.\n\n", fileName);
                     ReportError(message);
                     return 0;

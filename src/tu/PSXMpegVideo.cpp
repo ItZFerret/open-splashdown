@@ -118,7 +118,7 @@ typedef int u_long128 __attribute__((mode(TI)));
 #define SCE_GS_FINISH 0x3F
 
 // EE uncached segment address.
-#define UNCACHED(p) ((void *)(((unsigned int)(p) & 0x0FFFFFFF) | EE_UNCACHED))
+#define UNCACHED(p) ((void *)PS2_ADDR(((unsigned int)(p) & 0x0FFFFFFF) | EE_UNCACHED))
 
 #define INPUT_BUFFER_SIZE 0x60000
 
@@ -789,7 +789,7 @@ int PSXMpegVideoDecoder::DecodeBitstream()
             ASSERT(out, "DecodeBitstream: LpOutputData == 0");
             ASSERT(out->m_pixels, "DecodeBitstream: LpOutputData->LpData == 0");
             // Decode into the buffer through its uncached mirror.
-            sceIpuRGB32 *dst = (sceIpuRGB32 *)(((unsigned int)out->m_pixels & 0x0FFFFFFF) | EE_UNCACHED);
+            sceIpuRGB32 *dst = (sceIpuRGB32 *)PS2_ADDR((((unsigned int)out->m_pixels & 0x0FFFFFFF) | EE_UNCACHED));
             PSXMpegVideoOutputBuffer *buf = m_output;
             int width = buf->m_width;
             int height = buf->m_height;

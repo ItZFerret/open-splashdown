@@ -20,6 +20,11 @@ bool port_map_at(uintptr_t addr, size_t size);
 // Give a port_map* mapping back.
 void port_unmap(void *p, size_t size);
 
+// Before anything else at start-up: put the process where the game's
+// 32-bit addresses work (arm64 macOS: no address randomization; elsewhere
+// the executable's link options and ports/pc/hw.cpp do it).
+void port_os_fix_address_space(void);
+
 // A thread whose stack lies below 4 GB (the game keeps addresses of locals
 // in 32 bits). Returns a handle for port_thread_join, or nullptr.
 void *port_thread_start_low(void *(*fn)(void *), void *arg, size_t stackSize);

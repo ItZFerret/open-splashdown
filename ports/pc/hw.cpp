@@ -20,6 +20,7 @@
 // (port_vsync_wait, port_time_spin) instead of spinning.
 #include "port.h"
 #include "port_os.h"
+#include "port_ptr32.h"
 
 #include <atomic>
 #include <chrono>
@@ -50,11 +51,31 @@ const Region kRegions[] = {
     {0x70000000, 0x4000, "scratchpad"},
 };
 
+#if defined(__APPLE__) && defined(__aarch64__)
+// Native Apple silicon: by the time any of the port's code runs, the
+// system's own allocations have taken addresses after the executable,
+// these among them. So the three regions are segments of the executable,
+// which the kernel maps with it: tools/port/build.py links __PS2EE,
+// __PS2GS and __PS2SPR at their addresses in the game's window (-segaddr).
+__attribute__((section("__PS2EE,__regs"), used)) char g_eeRegisters[0x10000] = {1};
+__attribute__((section("__PS2GS,__regs"), used)) char g_gsRegisters[0x4000] = {1};
+__attribute__((section("__PS2SPR,__spr"), used)) char g_scratchpad[0x4000] = {1};
+
 void MapRegion(const Region &r)
 {
-    if (!port_map_at(r.addr, r.size))
-        port_fatal("can't map the %s at 0x%lx", r.name, (unsigned long)r.addr);
+    char *seg = r.addr == 0x10000000 ? g_eeRegisters : r.addr == 0x12000000 ? g_gsRegisters : g_scratchpad;
+    if ((uintptr_t)seg != PORT_HW(r.addr))
+        port_fatal("the %s are at %p, not 0x%llx: the executable was linked without its -segaddr options",
+                   r.name, (void *)seg, (unsigned long long)PORT_HW(r.addr));
+    memset(seg, 0, r.size);
 }
+#else
+void MapRegion(const Region &r)
+{
+    if (!port_map_at((uintptr_t)PORT_HW(r.addr), r.size))
+        port_fatal("can't map the %s at 0x%llx", r.name, (unsigned long long)PORT_HW(r.addr));
+}
+#endif
 
 #ifdef __linux__
 // The brk heap's start is randomized by up to 1 GB on x86-64, which can put
@@ -95,6 +116,7 @@ void NoAslr()
 // region at the first allocation, wherever that comes from.)
 __attribute__((constructor(101))) void HwInit()
 {
+    port_os_fix_address_space();
 #ifdef __linux__
     NoAslr();
     mallopt(M_MMAP_MAX, 0);
@@ -155,7 +177,7 @@ uint64_t g_lastWraps;
 // Timer 0 at ns: T0_COUNT and its overflow interrupts.
 void SetTimer(uint64_t ns)
 {
-    volatile uint32_t *t0Count = (volatile uint32_t *)0x10000000;
+    volatile uint32_t *t0Count = (volatile uint32_t *)PORT_HW(0x10000000);
     uint64_t ticks = ns * 3 / 5120; // 1 tick = 5120/3 ns
     *t0Count = (uint32_t)(ticks & 0xFFFF);
     uint64_t wraps = ticks >> 16;

@@ -22,6 +22,8 @@
 // replaces libmpeg and decodes movies on the host (libavcodec); while it
 // waits for a ch4 transfer, the data goes to it (port_ipu_set_movie_sink).
 #include "port.h"
+#include "port_simd.h"
+#include "port_ptr32.h"
 
 #include <atomic>
 #include <cmath>
@@ -33,7 +35,7 @@ namespace {
 
 volatile uint32_t &Reg(uintptr_t a)
 {
-    return *(volatile uint32_t *)a;
+    return *(volatile uint32_t *)PORT_HW(a);
 }
 
 const uintptr_t kCmd = 0x10002000, kCmdHi = 0x10002004, kCtrl = 0x10002010, kBp = 0x10002020;
@@ -586,7 +588,7 @@ int sceIpuSync(int mode, unsigned short timeout)
 {
     // ch4 first: the command reads what it delivers
     while (Reg(kD4Chcr) & 0x100)
-        __builtin_ia32_pause();
+        port_cpu_pause();
     std::lock_guard<std::mutex> l(g_lock);
     Poll(false);
     return 0;

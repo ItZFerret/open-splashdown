@@ -132,7 +132,28 @@ def blank_comments(s):
     return "".join(out)
 
 
+# A hardware address cast to a pointer, `(volatile int *)0x10003000`: the EE's
+# registers (0x1000xxxx), the GS's (0x1200xxxx), the scratchpad (0x7000xxxx).
+# ... or named first: `#define VIF1_STAT 0x10003C00`, used as `*(T *)VIF1_STAT`.
+# (The same numbers elsewhere are VIF codes and DMA tag words: left alone.)
+HW_RE = re.compile(r"(\*\s*\)\s*|#define[ \t]+[A-Z][A-Z0-9_]*[ \t]+)(0x(?:1[02]00|7000)[0-9A-Fa-f]{4})\b")
+
+
+def hardware_addresses(src):
+    """Hardware addresses as pointers get the PC's base (PORT_HW,
+    ports/pc/include/port_ptr32.h: 0 where game memory lies below 4 GB)."""
+    scan = blank_comments(src)
+    out, last = [], 0
+    for m in HW_RE.finditer(scan):
+        out.append(src[last:m.start(2)])
+        out.append("PORT_HW(" + m.group(2) + ")")
+        last = m.end(2)
+    out.append(src[last:])
+    return "".join(out)
+
+
 def rewrite(src, where):
+    src = hardware_addresses(src)
     scan = blank_comments(src)
     out, last = [], 0
     for m in ASM_RE.finditer(scan):

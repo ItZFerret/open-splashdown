@@ -7,6 +7,7 @@
 
 #include "gs/gs.h"
 #include "port.h"
+#include "port_simd.h"
 
 #include <algorithm>
 #include <atomic>
@@ -38,7 +39,7 @@ void *IntcThread(void *)
             if (idle > 2000)
                 port_futex_wait(&g_intcRequest, 0, 0);
             else
-                __builtin_ia32_pause();
+                port_cpu_pause();
         }
         port_raise_intc(5);
         g_intcDone.fetch_add(1, std::memory_order_relaxed);
@@ -292,7 +293,7 @@ bool Step()
             for (int ch = 0; ch < 10; ch++)
                 if (ch != 1)
                     port_dma_service(ch);
-            __builtin_ia32_pause();
+            port_cpu_pause();
         }
         g_stalled.store(0, std::memory_order_relaxed);
         port_dma_service(2);
