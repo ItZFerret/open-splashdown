@@ -36,6 +36,17 @@ Press F1 for the display settings: internal resolution (2x, 3x), widescreen
 window size, scaling, VSync, a frame counter, and Skip intro (start at the
 menu without the logos and intro movie).
 
+GPU renderer (experimental, new in this build)
+----------------------------------------------
+By default the picture is drawn on the CPU. In the F1 settings, set
+Renderer to GPU and restart the game to draw it on the graphics card
+instead, which keeps full speed at 2x and 3x resolution. It needs a
+graphics driver with Vulkan (current Nvidia, AMD and Intel drivers have
+it). This has never been run on Windows: if the picture is wrong or the
+game won't start, set Renderer back to Software (or delete
+%APPDATA%\splashdown\settings.ini) and send splashdown-log.txt - the
+lines starting "GPU:" say what happened.
+
 Saves go to %APPDATA%\splashdown\memcard0.
 
 If something goes wrong
