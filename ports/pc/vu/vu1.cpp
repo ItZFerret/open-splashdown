@@ -39,6 +39,7 @@
 
 #include "gs/gs.h"
 #include "port.h"
+#include "settings.h"
 
 #include <algorithm>
 #include <cmath>
@@ -945,12 +946,21 @@ uint64_t HashData()
     return h;
 }
 
+// Widescreen: the running program draws in screen coordinates (the menus,
+// the HUD), so its packets are squeezed to their own proportions
+// (gs_gif_kick). Set by vu1_run for the 2D renderers.
+bool g_run2d;
+// The GS frame a terrain or water program last ran in: while that is the
+// current frame a race is on screen, and the 2D is its HUD.
+uint64_t g_sceneFrame = ~0ull;
+
 void Kick(uint32_t qaddr)
 {
     if (g_kickLog)
         g_kickLog->push_back({qaddr, HashData()});
     if (g_kickSend)
-        gs_gif_kick(g_vu1.data, qaddr);
+        gs_gif_kick(g_vu1.data, qaddr, g_run2d ? port_widescreen_scale() : 1.0f,
+                    gs_frame_seq() - g_sceneFrame <= 2);
 }
 
 const char *g_names[2048];
@@ -1195,9 +1205,20 @@ uint64_t vu1_instructions()
     return __atomic_load_n(&g_vu1Steps, __ATOMIC_RELAXED);
 }
 
+// The microprograms that draw in screen coordinates.
+static bool Is2D(const char *name)
+{
+    return name && (!strcmp(name, "Quad2DRendererCode") || !strcmp(name, "Rectangle2DRendererCode") ||
+                    !strcmp(name, "Triangle2DRendererCode") || !strcmp(name, "Polyline2DRendererCode"));
+}
+
 void vu1_run(uint32_t pc)
 {
     uint32_t entry = pc;
+    const char *program = g_names[pc & 2047];
+    g_run2d = Is2D(program);
+    if (program && (!strncmp(program, "Terrain", 7) || !strncmp(program, "Water", 5)))
+        g_sceneFrame = gs_frame_seq();
     CommitAll();
     R.vf[0].f[0] = R.vf[0].f[1] = R.vf[0].f[2] = 0;
     R.vf[0].f[3] = 1.0f;

@@ -34,7 +34,12 @@ enum GsPath { GS_PATH1 = 0, GS_PATH2 = 1, GS_PATH3 = 2 };
 // Feed n quadwords of a GIF stream.
 void gs_gif_write(GsPath path, const void *qwords, size_t n);
 // PATH1: one GIF packet (tags up to EOP) from VU1 data memory at qword addr.
-void gs_gif_kick(const uint8_t *vumem, uint32_t qaddr);
+// xscale != 1 (widescreen, a 2D microprogram's packet: ports/pc/vu/vu1.cpp):
+// its elements' x are scaled by it, so what the presenter stretches comes
+// out in its own proportions; about the picture's centre, or with
+// anchorEdges about the nearer edge for elements in its left and right
+// thirds (the HUD's corner panels).
+void gs_gif_kick(const uint8_t *vumem, uint32_t qaddr, float xscale = 1.0f, bool anchorEdges = false);
 // Wait until the GS thread has taken everything queued (gs_gif_write/kick
 // return before it does).
 void gs_sync();

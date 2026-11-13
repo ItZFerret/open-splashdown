@@ -16,6 +16,7 @@
 #include "gs_tables.h"
 
 #include <algorithm>
+#include <climits>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -2678,6 +2679,95 @@ uint32_t PacketQwords(const uint8_t *vumem, uint32_t qaddr)
     return std::min(i, 1024u);
 }
 
+// Widescreen: give a 2D packet's vertices their own proportions back.
+//
+// The presenter shows the 640x448 picture wider than 4:3 and the 3D scene
+// is projected for that (ports/pc/settings.h), but the menus and the HUD
+// are drawn in screen coordinates and would be stretched. Scaling their x
+// by the same factor undoes the stretch. Each GIF tag's vertices are one
+// element (a sprite, a tile, a run of text) and are scaled about an anchor:
+// - in a race (anchorEdges: the HUD): the left edge for an element in the
+//   picture's left third, the right edge for one in its right third, else
+//   the centre, so the corner panels stay in their corners with what is
+//   drawn on them (a panel's tiles and its text are in the same third);
+// - in the menus: the centre for everything, which keeps a page's layout
+//   as it was designed, in the middle of the wider picture.
+// Left alone, so they still fill the picture: an element that spans it,
+// and the tiles of the bars along its top and bottom edges (short, and
+// touching that edge).
+// In the GS's primitive space the game's XYOFFSET puts its 640x448 pixels
+// at 1728..2368 by 1824..2272, 12.4 fixed point.
+void Squeeze2D(uint8_t *packet, uint32_t qwords, float xscale, bool anchorEdges)
+{
+    const int kLeft = 1728 << 4, kRight = 2368 << 4, kCentre = 2048 << 4;
+    const int kTop = 1824 << 4, kBottom = 2272 << 4;
+    const int kFull = 640 * 16 * 9 / 10;     // "spans the picture"
+    const int kBar = 64 << 4;                // a bar tile is at most this high
+    uint32_t i = 0;
+    while (i < qwords) {
+        uint64_t lo, hi;
+        memcpy(&lo, packet + i * 16, 8);
+        memcpy(&hi, packet + i * 16 + 8, 8);
+        uint32_t nloop = Bits(lo, 0, 15), eop = Bits(lo, 15, 1), flg = Bits(lo, 58, 2), nreg = Bits(lo, 60, 4);
+        if (!nreg)
+            nreg = 16;
+        uint32_t size = flg == 0 ? nloop * nreg : flg == 1 ? (nloop * nreg + 1) / 2 : nloop;
+        if (i + 1 + size > qwords)
+            break;
+        // where this tag's coordinates are: x in 16 bits at bit 0 of its
+        // item, y at bit 32 (PACKED) or 16 (REGLIST, A+D)
+        struct Vertex {
+            uint8_t *x;
+            uint8_t *y;
+        };
+        Vertex vs[1024];
+        int count = 0, lox = INT_MAX, hix = INT_MIN, loy = INT_MAX, hiy = INT_MIN;
+        uint8_t *data = packet + (i + 1) * 16;
+        for (uint32_t k = 0; flg < 2 && k < nloop * nreg && count < 1024; k++) {
+            uint32_t reg = Bits(hi, (k % nreg) * 4, 4);
+            uint8_t *item = flg == 0 ? data + k * 16 : data + k * 8;
+            bool xyz = reg == 0x4 || reg == 0x5 || reg == 0xC || reg == 0xD;
+            int yAt = flg == 0 ? 4 : 2;
+            if (flg == 0 && reg == 0xE) {     // A+D: the register's address is in the upper half
+                uint8_t addr = item[8];
+                xyz = addr == 0x04 || addr == 0x05 || addr == 0x0C || addr == 0x0D;
+                yAt = 2;
+            }
+            if (!xyz)
+                continue;
+            uint16_t x, y;
+            memcpy(&x, item, 2);
+            memcpy(&y, item + yAt, 2);
+            lox = std::min(lox, (int)x);
+            hix = std::max(hix, (int)x);
+            loy = std::min(loy, (int)y);
+            hiy = std::max(hiy, (int)y);
+            vs[count++] = {item, item + yAt};
+        }
+        bool bar = hiy - loy <= kBar && (loy <= kTop || hiy >= kBottom) && hix - lox >= (16 << 4);
+        if (count && hix - lox < kFull && !bar) {
+            int anchor = kCentre;
+            if (anchorEdges) {
+                int mid = (lox + hix) / 2;
+                if (mid < kLeft + (kRight - kLeft) / 3)
+                    anchor = kLeft;
+                else if (mid > kRight - (kRight - kLeft) / 3)
+                    anchor = kRight;
+            }
+            for (int k = 0; k < count; k++) {
+                uint16_t x;
+                memcpy(&x, vs[k].x, 2);
+                int nx = anchor + (int)lrintf(((int)x - anchor) * xscale);
+                x = (uint16_t)std::clamp(nx, 0, 0xFFFF);
+                memcpy(vs[k].x, &x, 2);
+            }
+        }
+        i += 1 + size;
+        if (eop)
+            break;
+    }
+}
+
 } // namespace
 
 void gs_gif_write(GsPath path, const void *qwords, size_t n)
@@ -2703,7 +2793,7 @@ void gs_gif_write(GsPath path, const void *qwords, size_t n)
     }
 }
 
-void gs_gif_kick(const uint8_t *vumem, uint32_t qaddr)
+void gs_gif_kick(const uint8_t *vumem, uint32_t qaddr, float xscale, bool anchorEdges)
 {
     StartQueue();
     uint32_t n = PacketQwords(vumem, qaddr);
@@ -2713,6 +2803,8 @@ void gs_gif_kick(const uint8_t *vumem, uint32_t qaddr)
         uint8_t buf[1024 * 16];
         for (uint32_t i = 0; i < n; i++)
             memcpy(buf + i * 16, vumem + ((qaddr + i) & 1023) * 16, 16);
+        if (xscale != 1.0f)
+            Squeeze2D(buf, n, xscale, anchorEdges);
         ProcessEntry(Q_KICK, 0, buf, n);
         return;
     }
@@ -2720,6 +2812,8 @@ void gs_gif_kick(const uint8_t *vumem, uint32_t qaddr)
     uint32_t first = std::min(n, 1024 - (qaddr & 1023));
     memcpy(e + 16, vumem + (qaddr & 1023) * 16, first * 16);
     memcpy(e + 16 + first * 16, vumem, (n - first) * 16);
+    if (xscale != 1.0f)
+        Squeeze2D(e + 16, n, xscale, anchorEdges);
     Commit(Q_KICK, 0, e, n);
 }
 

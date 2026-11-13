@@ -191,6 +191,41 @@ void PSXUIWaterEffect::ModifyMesh()
     float heights[256];
 
     static int PSXUIWaterEffect_ModifyMesh = -1;  // profiling timer id (unused)
+#ifdef SPLASHDOWN_PC
+    // Widescreen (ports/pc/settings.h): the grid is sized to fill a 4:3
+    // view, and the projection is wider by 1 / port_widescreen_scale(). So
+    // the grid is widened about its middle by the same ratio whenever the
+    // ratio changes, and every vertex sent again. (One effect exists at a
+    // time; a new one starts unwidened.)
+    if (m_mesh) {
+        static PSXUIWaterEffect *pcWho;
+        static float pcApplied = 1.0f;
+        static _D3DVECTOR *pcVertices;
+        if (pcWho != this || pcVertices != m_vertices) {
+            pcWho = this;
+            pcVertices = m_vertices;
+            pcApplied = 1.0f;
+        }
+        float pcWant = 1.0f / port_widescreen_scale();
+        if (pcWant != pcApplied) {
+            int pcTotal = m_width * m_height;
+            float pcLo = m_vertices[0].x, pcHi = m_vertices[0].x;
+            for (k = 1; k < pcTotal; k++) {
+                if (m_vertices[k].x < pcLo)
+                    pcLo = m_vertices[k].x;
+                if (m_vertices[k].x > pcHi)
+                    pcHi = m_vertices[k].x;
+            }
+            float pcMid = 0.5f * (pcLo + pcHi), pcRatio = pcWant / pcApplied;
+            for (z = 0; z < pcTotal; z++) {
+                m_vertices[z].x = pcMid + (m_vertices[z].x - pcMid) * pcRatio;
+                for (k = 0; k < m_shares[z].m_count; k++)
+                    m_mesh->SetXYZ(m_shares[z].m_strips[k], m_shares[z].m_vertices[k], &m_vertices[z]);
+            }
+            pcApplied = pcWant;
+        }
+    }
+#endif
     if (m_mesh) {
         for (z = 0; z < m_height; z++) {
             int index = z * m_width;
