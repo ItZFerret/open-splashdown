@@ -26,9 +26,7 @@
 #include <chrono>
 #include <thread>
 #include <climits>
-#include <linux/futex.h>
-#include <sys/syscall.h>
-#include <unistd.h>
+#include "port_os.h"
 
 extern uintptr_t g_vif1_src;
 void port_ipu_dma_in(const void *data, uint32_t qwc, bool first);
@@ -59,13 +57,12 @@ std::atomic<uint32_t> g_done, g_wake, g_doneWaiters;
 
 void FutexWait(std::atomic<uint32_t> &w, uint32_t v, long ns)
 {
-    struct timespec ts = {ns / 1000000000, ns % 1000000000};
-    syscall(SYS_futex, (uint32_t *)&w, FUTEX_WAIT_PRIVATE, v, &ts, nullptr, 0);
+    port_futex_wait(&w, v, ns);
 }
 
 void FutexWake(std::atomic<uint32_t> &w)
 {
-    syscall(SYS_futex, (uint32_t *)&w, FUTEX_WAKE_PRIVATE, INT32_MAX, nullptr, nullptr, 0);
+    port_futex_wake(&w, true);
 }
 
 
@@ -108,7 +105,7 @@ bool Valid(uint32_t addr, uint32_t qwc, bool spr)
     uintptr_t a = addr & 0x0FFFFFF0, end = a + (uintptr_t)qwc * 16;
     if (a >= 0x400000 && end <= top)
         return true;
-    top = std::max((uintptr_t)sbrk(0), port_heapguard_end());
+    top = port_game_heap_end();
     return a >= 0x400000 && end <= top;
 }
 

@@ -18,6 +18,7 @@
 // and sceMcSync(0 or 1, &cmd, &result) returns 1 (finished) with the
 // command's number and result, then -1 (idle) until the next call.
 #include "port.h"
+#include "port_os.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -31,6 +32,10 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include <vector>
+
+#ifndef O_BINARY
+#define O_BINARY 0   // Windows: no newline translation
+#endif
 
 namespace {
 
@@ -100,7 +105,7 @@ void MkdirP(const std::string &path)
     for (size_t i = 0; i <= path.size(); i++) {
         if (i == path.size() || path[i] == '/') {
             if (!cur.empty())
-                mkdir(cur.c_str(), 0755);
+                port_mkdir(cur.c_str());
         }
         if (i < path.size())
             cur += path[i];
@@ -121,12 +126,10 @@ void Init()
     Card &c = g_card[0];
     if (const char *d = getenv("PORT_MEMCARD_DIR"); d && *d) {
         c.root = d;
-    } else if (const char *x = getenv("XDG_DATA_HOME"); x && *x) {
-        c.root = std::string(x) + "/splashdown/memcard0";
-    } else if (const char *h = getenv("HOME"); h && *h) {
-        c.root = std::string(h) + "/.local/share/splashdown/memcard0";
+    } else if (const char *d = port_data_dir(); *d) {
+        c.root = std::string(d) + "/memcard0";
     } else {
-        port_log("memory card: no PORT_MEMCARD_DIR, XDG_DATA_HOME or HOME: none");
+        port_log("memory card: no PORT_MEMCARD_DIR and no home directory: none");
         return;
     }
     while (c.root.size() > 1 && c.root.back() == '/')
@@ -472,7 +475,7 @@ int sceMcMkdir(int port, int slot, const char *name)
         return Finish(kResNoEntry, "Mkdir", name);   // libmc: -4 for an existing name
     if (Free(*c) < 1 + EntryCost(*c, Parent(p)))
         return Finish(kResFullDevice, "Mkdir", name);
-    if (mkdir(Host(*c, p).c_str(), 0755) != 0)
+    if (port_mkdir(Host(*c, p).c_str()) != 0)
         return Finish(kResDeniedPermit, "Mkdir", name);
     return Finish(kResSucceed, "Mkdir", name);
 }
@@ -549,7 +552,7 @@ int sceMcOpen(int port, int slot, char *name, int mode)
     if (!exists && Free(*c) < EntryCost(*c, Parent(p)))
         return Finish(kResFullDevice, "Open", name);
     int acc = (mode & 3) == kRdOnly ? O_RDONLY : (mode & 3) == kWrOnly ? O_WRONLY : O_RDWR;
-    int fd = open(host.c_str(), acc | ((mode & kCreat) ? O_CREAT : 0), 0644);
+    int fd = open(host.c_str(), acc | O_BINARY | ((mode & kCreat) ? O_CREAT : 0), 0644);
     if (fd < 0)
         return Finish(kResDeniedPermit, "Open", name);
     g_handle[h].fd = fd;

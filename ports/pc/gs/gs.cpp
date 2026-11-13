@@ -24,12 +24,9 @@
 #include <cstring>
 #include <deque>
 #include <immintrin.h>
-#include <linux/futex.h>
+#include "port_os.h"
 #include <mutex>
-#include <sys/mman.h>
-#include <sys/syscall.h>
 #include <thread>
-#include <unistd.h>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -732,8 +729,8 @@ struct Rows {
 // below 0x10000000 and the executable's .bss: the race needs all of it).
 template <class T> T *BigArray(size_t n)
 {
-    void *p = mmap(nullptr, n * sizeof(T), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-    if (p == MAP_FAILED)
+    void *p = port_map(n * sizeof(T));
+    if (!p)
         port_fatal("GS: can't map %zu bytes", n * sizeof(T));
     return (T *)p;
 }
@@ -1377,10 +1374,14 @@ uint64_t g_minDone;                 // parser's lower bound of every worker's do
 uint64_t g_barriers;
 int g_inBarrier;                    // the parser waits for the workers (watchdog dumps)
 
+enum { FUTEX_WAIT_PRIVATE, FUTEX_WAKE_PRIVATE };
+
 void Futex(std::atomic<uint32_t> &w, int op, uint32_t v, long ns)
 {
-    struct timespec ts = {0, ns};
-    syscall(SYS_futex, (uint32_t *)&w, op, v, ns ? &ts : nullptr, nullptr, 0);
+    if (op == FUTEX_WAIT_PRIVATE)
+        port_futex_wait(&w, v, ns);
+    else
+        port_futex_wake(&w, v != 1);
 }
 
 // Spins until w != v or about ns pass; returns w.

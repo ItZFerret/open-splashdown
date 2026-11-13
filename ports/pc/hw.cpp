@@ -19,6 +19,7 @@
 // time (below). The game's waits for a vblank or a timer mark sleep
 // (port_vsync_wait, port_time_spin) instead of spinning.
 #include "port.h"
+#include "port_os.h"
 
 #include <atomic>
 #include <chrono>
@@ -26,15 +27,14 @@
 #include <cstring>
 #include <climits>
 #include <cstdlib>
-#include <fcntl.h>
-#include <linux/futex.h>
-#include <sys/syscall.h>
-#include <malloc.h>
 #include <mutex>
+#include <thread>
+#ifdef __linux__
+#include <fcntl.h>
+#include <malloc.h>
 #include <sys/personality.h>
 #include <unistd.h>
-#include <sys/mman.h>
-#include <thread>
+#endif
 
 namespace {
 
@@ -52,12 +52,11 @@ const Region kRegions[] = {
 
 void MapRegion(const Region &r)
 {
-    void *p = mmap((void *)r.addr, r.size, PROT_READ | PROT_WRITE,
-                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0);
-    if (p != (void *)r.addr)
+    if (!port_map_at(r.addr, r.size))
         port_fatal("can't map the %s at 0x%lx", r.name, (unsigned long)r.addr);
 }
 
+#ifdef __linux__
 // The brk heap's start is randomized by up to 1 GB on x86-64, which can put
 // it past 256 MB (the game masks pointers with 0x0FFFFFFF): run without
 // address randomization, re-executing once to get it.
@@ -89,13 +88,19 @@ void NoAslr()
     argv[argc] = nullptr;
     execv(path, argv);
 }
+#endif
 
+// Before every other static constructor of the port and the game. (macOS
+// and Windows: the game's heap is ports/pc/lowheap.cpp's, which maps its
+// region at the first allocation, wherever that comes from.)
 __attribute__((constructor(101))) void HwInit()
 {
+#ifdef __linux__
     NoAslr();
-    setvbuf(stdout, nullptr, _IOLBF, 0);  // the game's printfs among the port's logs
     mallopt(M_MMAP_MAX, 0);
     mallopt(M_ARENA_MAX, 1);
+#endif
+    setvbuf(stdout, nullptr, _IOLBF, 0);  // the game's printfs among the port's logs
     for (const Region &r : kRegions)
         MapRegion(r);
 }
@@ -162,7 +167,7 @@ void Vblank()
 {
     g_vblanks++;
     RunHandler(0);
-    syscall(SYS_futex, (uint32_t *)&g_vblanks, FUTEX_WAKE_PRIVATE, INT32_MAX, nullptr, nullptr, 0);
+    port_futex_wake(&g_vblanks, true);
 }
 
 // Deterministic mode: the next vblank, now, once the DMA channels are idle
@@ -226,8 +231,7 @@ extern "C" void port_vsync_wait(void)
         return;
     }
     uint32_t now = (uint32_t)g_vblanks.load();
-    struct timespec ts = {0, 2000000};
-    syscall(SYS_futex, (uint32_t *)&g_vblanks, FUTEX_WAIT_PRIVATE, now, &ts, nullptr, 0);
+    port_futex_wait(&g_vblanks, now, 2000000);
 }
 
 // The game spins until the timer passes a mark (JetskiLoadManager's 5 s
@@ -303,8 +307,7 @@ int sceGsSyncV(int mode)
     }
     uint64_t now = g_vblanks;
     while (g_vblanks == now) {
-        struct timespec ts = {0, 20000000};
-        syscall(SYS_futex, (uint32_t *)&g_vblanks, FUTEX_WAIT_PRIVATE, (uint32_t)now, &ts, nullptr, 0);
+        port_futex_wait(&g_vblanks, (uint32_t)now, 20000000);
     }
     return 0;
 }

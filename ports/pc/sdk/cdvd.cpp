@@ -2,16 +2,29 @@
 //
 // The game finds its files through its own table of LSNs (FileIO.cpp), so
 // reads go to the image by sector, 2048 bytes each, as the drive served
-// them. The image is $SPLASHDOWN_DISC, else baserom/splashdown.bin
-//. Reads complete at once: sceCdSync never waits.
+// them. The image is $SPLASHDOWN_DISC (ports/pc/main.cpp sets it from the
+// command line: an image dropped on the executable), else the first .iso or
+// .bin beside the executable, else baserom/splashdown.bin. Reads complete at
+// once: sceCdSync never waits.
 #include "port.h"
+#include "port_os.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <algorithm>
+#include <dirent.h>
 #include <mutex>
+#include <vector>
 #include <string>
+#ifdef _WIN32
+#include <io.h>
+#define dup _dup
+#define fseeko fseeko64
+#else
 #include <unistd.h>
+#endif
 
 namespace {
 
@@ -23,9 +36,30 @@ unsigned g_streamLsn; // the next sector a sceCdSt* stream reads
 
 std::string DiscPath()
 {
-    if (const char *env = getenv("SPLASHDOWN_DISC"))
+    if (const char *env = getenv("SPLASHDOWN_DISC"); env && *env)
         return env;
-    return "baserom/splashdown.bin";
+    static std::string found;
+    static std::once_flag once;
+    std::call_once(once, [] {
+        std::string dir = port_exe_dir();
+        std::vector<std::string> names;
+        if (DIR *d = opendir(dir.c_str())) {
+            while (dirent *e = readdir(d)) {
+                std::string n = e->d_name;
+                std::string ext = n.size() > 4 ? n.substr(n.size() - 4) : "";
+                std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char c) { return (char)tolower(c); });
+                if (ext == ".iso" || ext == ".bin")
+                    names.push_back(n);
+            }
+            closedir(d);
+        }
+        std::sort(names.begin(), names.end());
+        if (!names.empty()) {
+            found = dir + "/" + names[0];
+            port_log("disc image: %s", found.c_str());
+        }
+    });
+    return found.empty() ? "baserom/splashdown.bin" : found;
 }
 
 FILE *Disc()
@@ -35,14 +69,15 @@ FILE *Disc()
     std::string path = DiscPath();
     g_disc = fopen(path.c_str(), "rb");
     if (!g_disc)
-        port_fatal("can't open the disc image %s (set SPLASHDOWN_DISC)", path.c_str());
+        port_fatal("Can't open the disc image %s.\n\nPut your Splashdown (NTSC-U, SLUS-20223) .iso in the same folder as the game, "
+                   "drop it on the executable, or set SPLASHDOWN_DISC.", path.c_str());
     return g_disc;
 }
 
 int ReadSectors(unsigned lsn, unsigned sectors, void *buf)
 {
     FILE *f = Disc();
-    if (fseeko(f, (off_t)lsn * kSector, SEEK_SET) != 0) {
+    if (fseeko(f, (long long)lsn * kSector, SEEK_SET) != 0) {
         g_error = 0x32; // SCECdErREAD
         return 0;
     }
@@ -65,13 +100,14 @@ size_t port_disc_read(uint64_t offset, void *buf, size_t bytes)
         std::string path = DiscPath();
         FILE *f = fopen(path.c_str(), "rb");
         if (!f)
-            port_fatal("can't open the disc image %s (set SPLASHDOWN_DISC)", path.c_str());
+            port_fatal("Can't open the disc image %s.\n\nPut your Splashdown (NTSC-U, SLUS-20223) .iso in the same folder as the game, "
+                   "drop it on the executable, or set SPLASHDOWN_DISC.", path.c_str());
         fd = dup(fileno(f));
         fclose(f);
     });
     size_t done = 0;
     while (done < bytes) {
-        ssize_t got = pread(fd, (char *)buf + done, bytes - done, (off_t)(offset + done));
+        long long got = port_pread(fd, (char *)buf + done, bytes - done, offset + done);
         if (got <= 0)
             break;
         done += got;

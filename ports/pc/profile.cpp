@@ -5,6 +5,7 @@
 // lines; addr2line symbolizes them.
 // PORT_PROFILE_SECONDS=N exits (and writes them) after N seconds;
 // PORT_PROFILE_START=N starts sampling N seconds in.
+#ifdef __linux__
 #include "port.h"
 
 #include <atomic>
@@ -134,3 +135,5 @@ void port_profile_dump()
     fclose(f);
     port_log("profile: %d samples to %s", n, g_out);
 }
+
+#endif // __linux__

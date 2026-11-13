@@ -9,7 +9,7 @@
 
 #include <cstddef>
 #include <cstdint>
-#include <sys/mman.h>
+#include "port_os.h"
 #include <vector>
 
 // Picture buffers live outside the game's brk heap (a frame a vblank would
@@ -20,10 +20,9 @@ template <class T> struct PortMmapAllocator {
     template <class U> PortMmapAllocator(const PortMmapAllocator<U> &) {}
     T *allocate(size_t n)
     {
-        void *p = mmap(nullptr, n * sizeof(T), PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
-        return p == MAP_FAILED ? nullptr : (T *)p;
+        return (T *)port_map(n * sizeof(T));
     }
-    void deallocate(T *p, size_t n) { munmap(p, n * sizeof(T)); }
+    void deallocate(T *p, size_t n) { port_unmap(p, n * sizeof(T)); }
     template <class U> bool operator==(const PortMmapAllocator<U> &) const { return true; }
 };
 using PortFrame = std::vector<uint32_t, PortMmapAllocator<uint32_t>>;

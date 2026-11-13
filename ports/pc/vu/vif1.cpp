@@ -11,11 +11,7 @@
 #include <algorithm>
 #include <atomic>
 #include <chrono>
-#include <pthread.h>
-#include <linux/futex.h>
-#include <sys/mman.h>
-#include <sys/syscall.h>
-#include <unistd.h>
+#include "port_os.h"
 #include <thread>
 #include <cstdio>
 #include <cstdlib>
@@ -40,7 +36,7 @@ void *IntcThread(void *)
     for (;;) {
         for (int idle = 0; !g_intcRequest.load(std::memory_order_acquire); idle++) {
             if (idle > 2000)
-                syscall(SYS_futex, (uint32_t *)&g_intcRequest, FUTEX_WAIT_PRIVATE, 0, nullptr, nullptr, 0);
+                port_futex_wait(&g_intcRequest, 0, 0);
             else
                 __builtin_ia32_pause();
         }
@@ -55,14 +51,9 @@ struct IntcThreadStart {
     IntcThreadStart()
     {
         const size_t size = 1 << 20;
-        void *stack = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS | MAP_32BIT, -1, 0);
-        pthread_attr_t attr;
-        pthread_attr_init(&attr);
-        pthread_attr_setstack(&attr, stack, size);
-        pthread_t t;
         port_watch_futex(&g_intcRequest, "vif1.intcRequest");
-        pthread_create(&t, &attr, IntcThread, nullptr);
-        pthread_detach(t);
+        if (!port_thread_start_low(IntcThread, nullptr, size))
+            port_fatal("can't start the VIF1 interrupt thread");
     }
 };
 
@@ -296,7 +287,7 @@ bool Step()
         g_intcRaised.fetch_add(1, std::memory_order_relaxed);
         g_stalled.store(1, std::memory_order_relaxed);
         g_intcRequest.store(1, std::memory_order_release);
-        syscall(SYS_futex, (uint32_t *)&g_intcRequest, FUTEX_WAKE_PRIVATE, 1, nullptr, nullptr, 0);
+        port_futex_wake(&g_intcRequest, false);
         while (g_intcRequest.load(std::memory_order_acquire)) {
             for (int ch = 0; ch < 10; ch++)
                 if (ch != 1)

@@ -83,7 +83,9 @@ def run(outdir, frames, every, exe, audio=False):
     log = os.path.join(outdir, "run.log")
     t = time.time()
     with open(log, "w") as f:
-        p = subprocess.run(["nice", "-n", "5", "taskset", "-c", "0-15", exe], env=env, stdout=f, stderr=subprocess.STDOUT)
+        # Linux: below the desktop's priority, on the first 16 CPUs
+        prefix = [t for t in (["nice", "-n", "5"], ["taskset", "-c", "0-15"]) if shutil.which(t[0])]
+        p = subprocess.run([a for t in prefix for a in t] + [exe], env=env, stdout=f, stderr=subprocess.STDOUT)
     secs = time.time() - t
     print(f"run: {secs:.0f} s, exit {p.returncode}, log {os.path.relpath(log, ROOT)}")
     return p.returncode
@@ -155,7 +157,8 @@ def main():
     ap.add_argument("--audio", action="store_true")
     ap.add_argument("--frames", type=int)
     ap.add_argument("--every", type=int, default=EVERY)
-    ap.add_argument("--exe", default=os.path.join(ROOT, "build/port/splashdown"))
+    host = {"darwin": "build/port-macos/splashdown", "win32": "build/port-windows/splashdown.exe"}
+    ap.add_argument("--exe", default=os.path.join(ROOT, host.get(sys.platform, "build/port/splashdown")))
     args = ap.parse_args()
     frames = args.frames or (700 if args.quick else FRAMES)
     golden, check = (GOLDEN_AUDIO, CHECK_AUDIO) if args.audio else (GOLDEN, CHECK)

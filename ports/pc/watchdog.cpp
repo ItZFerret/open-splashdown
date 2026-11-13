@@ -12,6 +12,7 @@
 // with status 86 after the dump; otherwise the run
 // goes on and the watchdog re-arms once frames move again. SIGUSR2 dumps
 // on demand (`kill -USR2 <pid>`), even with PORT_WATCHDOG=0.
+#ifdef __linux__
 #include "port.h"
 
 #include "gs/gs.h"
@@ -304,3 +305,5 @@ void port_watchdog_start(void)
     bool exitAfter = getenv("PORT_WATCHDOG_EXIT") && atoi(getenv("PORT_WATCHDOG_EXIT"));
     std::thread([seconds, exitAfter] { Watch(seconds, exitAfter); }).detach();
 }
+
+#endif // __linux__

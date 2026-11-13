@@ -38,6 +38,12 @@ void port_gs_csr_ack(unsigned int v);
 #ifdef __cplusplus
 }
 #endif
+/* The matching build's section placements (__attribute__((section(".sdata")))
+   ...) are ELF's: Mach-O and COFF name sections differently, and the PC has
+   no use for them. An empty attribute list is left. */
+#ifndef __linux__
+#define section(name)
+#endif
 #define __I_break(code) port_break(code)
 #define __I_nop() ((void)0)
 

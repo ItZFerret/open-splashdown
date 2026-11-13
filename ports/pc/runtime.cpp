@@ -1,13 +1,12 @@
 // What the game takes from mwcc's MSL runtime, newlib and retail's linker
 // script, on the PC.
 #include "port.h"
+#include "port_os.h"
 
 #include <cctype>
-#include <csignal>
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
-#include <unistd.h>
 
 void port_log(const char *fmt, ...)
 {
@@ -23,10 +22,12 @@ void port_fatal(const char *fmt, ...)
 {
     va_list ap;
     va_start(ap, fmt);
-    fputs("[port] fatal: ", stderr);
-    vfprintf(stderr, fmt, ap);
-    fputc('\n', stderr);
+    char text[1024];
+    vsnprintf(text, sizeof text, fmt, ap);
     va_end(ap);
+    fprintf(stderr, "[port] fatal: %s\n", text);
+    fflush(nullptr);
+    port_show_error(text);
     abort();
 }
 
@@ -40,7 +41,7 @@ void port_exit(int code)
     port_profile_dump();
     port_audio_shutdown();
     fflush(nullptr);
-    _exit(code);
+    port_os_exit(code);
 }
 
 extern "C" {
@@ -51,7 +52,7 @@ void port_break(int code)
 {
     port_log("ASSERT break %d", code);
     port_profile_dump();
-    raise(SIGTRAP);
+    port_debug_break();
 }
 
 // A pointer above 4 GB reached a 32-bit field (PS2_PTR, port_ptr32.h).

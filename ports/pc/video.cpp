@@ -16,6 +16,7 @@
 // A status line goes to stderr every 5 seconds (with game frames per second,
 // the average and the slowest second; PORT_FPS_LOG=1 logs every second).
 #include "port.h"
+#include "port_os.h"
 
 #include "gs/gs.h"
 #include "vu/vu.h"
@@ -203,7 +204,11 @@ void port_video_run(volatile bool *done)
     // PORT_HEADLESS=0 tries a window even without WAYLAND_DISPLAY/DISPLAY
     // (e.g. SDL_VIDEO_DRIVER=offscreen)
     long headlessEnv = EnvInt("PORT_HEADLESS", -1);
+#ifdef __linux__
     bool headless = headlessEnv > 0 || (headlessEnv < 0 && !getenv("WAYLAND_DISPLAY") && !getenv("DISPLAY"));
+#else
+    bool headless = headlessEnv > 0;   // macOS, Windows: there is always a display to try
+#endif
     Window win;
     if (headless && headlessEnv < 0)
         port_log("video: no WAYLAND_DISPLAY or DISPLAY: running headless (set one, or PORT_HEADLESS=0)");
@@ -286,7 +291,7 @@ void port_video_run(volatile bool *done)
         static auto start = now;
         if (trapAt && now - start > std::chrono::seconds(trapAt)) {
             trapAt = 0;
-            raise(SIGTRAP);
+            port_debug_break();
         }
         if (now - lastSecond >= std::chrono::seconds(1)) {
             // game frames per second (Flips), each second

@@ -22,7 +22,9 @@
 //
 // Without PORT_HEAPGUARD every call goes to glibc's allocator, except the
 // port threads' (their own heap, below).
+#ifdef __linux__
 #include "port.h"
+#include "port_os.h"
 
 #include <algorithm>
 #include <cerrno>
@@ -325,11 +327,17 @@ void port_heap_this_thread(void)
     t_portHeap = 1;
 }
 
+// ports/pc/dma.cpp: the end of the game's heap.
 // ports/pc/dma.cpp: the end of game memory when the guard region holds game
 // blocks (PORT_HEAPGUARD), else 0 (the brk heap's end is the limit).
 uintptr_t port_heapguard_end(void)
 {
     return Enabled() ? kEnd : 0;
+}
+
+uintptr_t port_game_heap_end(void)
+{
+    return std::max((uintptr_t)sbrk(0), port_heapguard_end());
 }
 
 extern "C" {
@@ -440,3 +448,5 @@ int posix_memalign(void **out, size_t align, size_t size)
 }
 
 } // extern "C"
+
+#endif // __linux__

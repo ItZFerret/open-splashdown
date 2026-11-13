@@ -62,6 +62,22 @@ extern char WaterObjectCode[];
 extern char WaterScreenSpaceRendererCode[];
 extern char port_vupackets_start[];
 extern char port_vupackets_end[];
+extern const uint32_t port_vurelocs[];
+extern const uint32_t port_vurelocs_end[];
+}
+
+// When the packets come straight from the executable (tools/port/vu.py
+// gen_elf), their REF tags still hold retail's addresses: point each at its
+// data in the block. After ports/pc/hw.cpp's HwInit, before any game code.
+__attribute__((constructor(102))) static void RelocatePackets()
+{
+    for (const uint32_t *r = port_vurelocs; r < port_vurelocs_end; r += 2) {
+        uintptr_t target = (uintptr_t)port_vupackets_start + r[1];
+        if (target >> 32)
+            port_fatal("the VU packets lie above 4 GB (%p): the executable must be linked low", (void *)target);
+        uint32_t t = (uint32_t)target;
+        memcpy(port_vupackets_start + r[0], &t, 4);
+    }
 }
 
 static const struct {

@@ -1,0 +1,47 @@
+#!/bin/bash
+# Splashdown.app's executable: finds the disc image, starts the game
+# (Contents/MacOS/splashdown) with its output in ~/Library/Logs/Splashdown.log,
+# and says so in a dialog if it stops with an error.
+#
+# The disc image, in order: $SPLASHDOWN_DISC; the one chosen last time
+# (if it is still there); the first .iso or .bin in the folder the app is
+# in; else a file dialog. The choice is remembered in
+# ~/Library/Application Support/splashdown/disc-path.
+here="$(cd "$(dirname "$0")" && pwd)"
+app="$(cd "$here/../.." && pwd)"
+data="$HOME/Library/Application Support/splashdown"
+log="$HOME/Library/Logs/Splashdown.log"
+mkdir -p "$data" "$HOME/Library/Logs"
+
+disc="$SPLASHDOWN_DISC"
+if [ -z "$disc" ] && [ -f "$data/disc-path" ]; then
+    disc="$(cat "$data/disc-path")"
+    [ -f "$disc" ] || disc=""
+fi
+if [ -z "$disc" ]; then
+    for f in "$(dirname "$app")"/*.iso "$(dirname "$app")"/*.ISO "$(dirname "$app")"/*.bin; do
+        if [ -f "$f" ]; then
+            disc="$f"
+            break
+        fi
+    done
+fi
+if [ -z "$disc" ]; then
+    disc="$(osascript -e 'POSIX path of (choose file with prompt "Choose your Splashdown disc image (US release, SLUS-20223, .iso)")' 2>/dev/null)"
+    [ -n "$disc" ] || exit 0
+fi
+printf '%s' "$disc" > "$data/disc-path"
+
+cd "$data"
+SPLASHDOWN_DISC="$disc" "$here/splashdown" > "$log" 2>&1
+status=$?
+if [ $status -ne 0 ]; then
+    rm -f "$data/disc-path"   # ask again next time, in case the image was the problem
+    reason="$(grep -A3 'fatal:' "$log" | head -4 | tr '"\\' "' ")"
+    osascript -e "display dialog \"Splashdown stopped with an error (status $status).
+
+$reason
+
+The full log is in ~/Library/Logs/Splashdown.log\" buttons {\"OK\"} default button 1 with icon stop with title \"Splashdown\"" >/dev/null 2>&1
+fi
+exit $status
